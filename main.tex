@@ -191,10 +191,6 @@ These requirements motivate kernel support for branch-aware process management t
 
 More fundamentally, Baumann et al.~\cite{fork-hotos} argue that \texttt{fork()} is no longer a good abstraction for modern systems, citing its poor composability with other OS abstractions and high overhead for large address spaces. The design of \syscall is motivated by similar observations: rather than copying entire address spaces, it creates lightweight branches with explicit resource sharing via flags (\texttt{BR\_FS}, \texttt{BR\_MEMORY}).
 
-\subsection{Container and Namespace Isolation}
-
-Linux namespaces~\cite{namespaces} provide various forms of isolation (mount, PID, network, etc.). Containers~\cite{docker} combine namespaces with cgroups~\cite{cgroups} for resource isolation, and systems like gVisor~\cite{gvisor} add additional sandboxing. MVVM~\cite{mvvm} uses WebAssembly-based containers with hardware enclaves for secure, cross-platform AI agent deployment and workspace migration. Our approach is complementary: we use mount namespaces for filesystem isolation with lightweight branch-ID-based signal barriers in \syscall, focusing on lightweight branching and rollback rather than cross-platform portability or secure enclaves.
-
 %% =============================================================================
 %% BRANCHFS DESIGN
 %% =============================================================================
@@ -496,6 +492,10 @@ We measure sequential read and write throughput on a 50\,MB file (64\,KB blocks)
 %% =============================================================================
 \section{Related Work}
 
+\paragraph{Container and Namespace Isolation.}
+Linux namespaces~\cite{namespaces} provide various forms of isolation (mount, PID, network, etc.). Containers~\cite{docker} combine namespaces with cgroups~\cite{cgroups} for resource isolation, and systems like gVisor~\cite{gvisor} add additional sandboxing. MVVM~\cite{mvvm} uses WebAssembly-based containers with hardware enclaves for secure, cross-platform AI agent deployment and workspace migration. Our approach is complementary: we use mount namespaces for filesystem isolation with lightweight branch-ID-based signal barriers in \syscall, focusing on lightweight branching and rollback rather than cross-platform portability or secure enclaves.
+
+\paragraph{Intra-Process Isolation.}
 Light-weight contexts (lwCs)~\cite{lwc} provide independent protection domains within a process, enabling fast rollback by switching contexts. Dune~\cite{dune} uses hardware virtualization to give user-level processes access to privileged CPU features for sandboxing. Capsicum~\cite{capsicum} introduces capability-based sandboxing for Unix. These systems focus on isolation within or below the process boundary; \syscall instead provides isolation \emph{across} speculative branches with coordinated commit/abort semantics.
 
 %% =============================================================================
