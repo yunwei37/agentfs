@@ -45,20 +45,20 @@
 \author{Cong Wang}
 \authornote{Corresponding author.}
 \affiliation{%
-  \institution{Multikernel Technologies, Inc.}
-  \country{USA}
+	\institution{Multikernel Technologies, Inc.}
+	\country{USA}
 }
 \email{cwang@multikernel.io}
 
 \author{Yusheng Zheng}
 \affiliation{%
-  \institution{University of California, Santa Cruz}
-  \country{USA}
+	\institution{University of California, Santa Cruz}
+	\country{USA}
 }
 \email{yzhen165@ucsc.edu}
 
 \begin{abstract}
-AI agents increasingly rely on speculative execution: exploring multiple solution paths in parallel and committing only a successful one. Because each speculative branch may modify files and spawn processes, this requires isolating both \emph{filesystem state} and \emph{process state} across branches, with atomic commit and rollback semantics. To address this, we present a two-component framework. First, \sys is a FUSE-based filesystem that gives each speculative branch an isolated copy-on-write workspace, with O(1) creation, atomic commit to the base directory, and automatic invalidation of sibling branches, all without root privileges. Second, \syscall is a proposed Linux syscall that spawns processes into isolated speculative branches with reliable termination, kernel-enforced sibling isolation, and first-commit-wins coordination. Preliminary evaluation of \sys shows sub-350\,$\mu$s branch creation independent of base filesystem size, and modification-proportional commit overhead (under 1\,ms for small changes).
+	AI agents increasingly rely on speculative execution: exploring multiple solution paths in parallel and committing only a successful one. Because each speculative branch may modify files and spawn processes, this requires isolating both \emph{filesystem state} and \emph{process state} across branches, with atomic commit and rollback semantics. To address this, we present a two-component framework. First, \sys is a FUSE-based filesystem that gives each speculative branch an isolated copy-on-write workspace, with O(1) creation, atomic commit to the base directory, and automatic invalidation of sibling branches, all without root privileges. \sys is open sourced in \url{https://github.com/multikernel/branchfs}. Second, \syscall is a proposed Linux syscall that spawns processes into isolated speculative branches with reliable termination, kernel-enforced sibling isolation, and first-commit-wins coordination. Preliminary evaluation of \sys shows sub-350\,$\mu$s branch creation independent of base filesystem size, and modification-proportional commit overhead (under 1\,ms for small changes).
 \end{abstract}
 
 \keywords{Speculative execution, AI agents, Filesystem branching, Copy-on-write, FUSE, Operating system primitives}
@@ -77,18 +77,18 @@ Existing OS mechanisms do not meet these requirements. Filesystem branching prim
 Our key observation is that FUSE-based file-level copy-on-write, combined with Linux mount namespaces, can provide lightweight speculative branching entirely in userspace without root privileges. Based on this, we present a two-component framework:
 
 \begin{enumerate}
-    \item \textbf{\sys}: A FUSE-based~\cite{fuse} filesystem\footnote{\sys is open-source: \url{https://github.com/multikernel/branchfs}} that gives each speculative branch an isolated copy-on-write workspace, with O(1) creation, commit of all changes to the base directory, and automatic invalidation of sibling branches.
+	\item \textbf{\sys}: A FUSE-based~\cite{fuse} filesystem that gives each speculative branch an isolated copy-on-write workspace, with O(1) creation, commit of all changes to the base directory, and automatic invalidation of sibling branches.
 
-    \item \textbf{\syscall}: A proposed Linux syscall that spawns processes into isolated speculative branches with reliable termination, kernel-enforced sibling isolation, and first-commit-wins coordination.
+	\item \textbf{\syscall}: A proposed Linux syscall that spawns processes into isolated speculative branches with reliable termination, kernel-enforced sibling isolation, and first-commit-wins coordination.
 \end{enumerate}
 
 Preliminary evaluation of \sys shows sub-350\,$\mu$s branch creation independent of base filesystem size, and modification-proportional commit overhead (under 1\,ms for small changes).
 
 We make the following contributions:
 \begin{itemize}
-    \item The design and implementation of \sys, a FUSE-based branching filesystem with copy-on-write isolation, nested branches, and epoch-based sibling invalidation, all without root privileges.
-    \item The design of \syscall, a proposed syscall for branch-aware process coordination with reliable termination and first-commit-wins semantics.
-    \item A preliminary evaluation demonstrating the low overhead of \sys.
+	\item The design and implementation of \sys, a FUSE-based branching filesystem with copy-on-write isolation, nested branches, and epoch-based sibling invalidation, all without root privileges.
+	\item The design of \syscall, a proposed syscall for branch-aware process coordination with reliable termination and first-commit-wins semantics.
+	\item A preliminary evaluation demonstrating the low overhead of \sys.
 \end{itemize}
 
 %% =============================================================================
@@ -128,21 +128,21 @@ The core requirements for speculative filesystem branching are: (1)~portability 
 Table~\ref{tab:comparison} summarizes this comparison.
 
 \begin{table}[t]
-    \centering
-    \caption{Feature comparison of filesystem branching mechanisms.}
-    \label{tab:comparison}
-    \resizebox{\columnwidth}{!}{%
-    \begin{tabular}{lccccc}
-        \toprule
-        Feature & OverlayFS & Btrfs & DM-Snap & DAXFS & \sys \\
-        \midrule
-        Portable across FSes     & \cmark & \xmark & \cmark & \xmark & \cmark \\
-        Nested branches          & \xmark & \cmark & \xmark & \cmark & \cmark \\
-        Commit-to-root           & \xmark & \xmark & \xmark & \cmark & \cmark \\
-        Sibling invalidation     & \xmark & \xmark & \xmark & \cmark & \cmark \\
-        No root privileges       & \xmark & \xmark & \xmark & \xmark & \cmark \\
-        \bottomrule
-    \end{tabular}}
+	\centering
+	\caption{Feature comparison of filesystem branching mechanisms.}
+	\label{tab:comparison}
+	\resizebox{\columnwidth}{!}{%
+		\begin{tabular}{lccccc}
+			\toprule
+			Feature              & OverlayFS & Btrfs  & DM-Snap & DAXFS  & \sys   \\
+			\midrule
+			Portable across FSes & \cmark    & \xmark & \cmark  & \xmark & \cmark \\
+			Nested branches      & \xmark    & \cmark & \xmark  & \cmark & \cmark \\
+			Commit-to-root       & \xmark    & \xmark & \xmark  & \cmark & \cmark \\
+			Sibling invalidation & \xmark    & \xmark & \xmark  & \cmark & \cmark \\
+			No root privileges   & \xmark    & \xmark & \xmark  & \xmark & \cmark \\
+			\bottomrule
+		\end{tabular}}
 \end{table}
 
 \subsection{Process Management Requirements}
@@ -162,23 +162,23 @@ Beyond filesystem isolation, speculative execution requires coordinating process
 Table~\ref{tab:process-comparison} summarizes this comparison.
 
 \begin{table}[t]
-    \centering
-    \caption{Feature comparison of process management mechanisms for speculative branching.}
-    \label{tab:process-comparison}
-    \resizebox{\columnwidth}{!}{%
-    \begin{tabular}{lccccc}
-        \toprule
-        Feature & pgrp & session & cgroup & PID ns & \syscall \\
-        \midrule
-        Reliable termination & \xmark & \xmark & \cmark & \cmark & \cmark \\
-        No escape possible   & \xmark & \xmark & \cmark & \cmark & \cmark \\
-        Sibling isolation    & \xmark & \xmark & \xmark & \cmark & \cmark \\
-        No setup required    & \cmark & \cmark & \xmark & \xmark & \cmark \\
-        No root privileges   & \cmark & \cmark & \xmark & \xmark & \cmark \\
-        No PID~1 complexity  & \cmark & \cmark & \cmark & \xmark & \cmark \\
-        Exclusive groups     & \xmark & \xmark & \xmark & \xmark & \cmark \\
-        \bottomrule
-    \end{tabular}}
+	\centering
+	\caption{Feature comparison of process management mechanisms for speculative branching.}
+	\label{tab:process-comparison}
+	\resizebox{\columnwidth}{!}{%
+		\begin{tabular}{lccccc}
+			\toprule
+			Feature              & pgrp   & session & cgroup & PID ns & \syscall \\
+			\midrule
+			Reliable termination & \xmark & \xmark  & \cmark & \cmark & \cmark   \\
+			No escape possible   & \xmark & \xmark  & \cmark & \cmark & \cmark   \\
+			Sibling isolation    & \xmark & \xmark  & \xmark & \cmark & \cmark   \\
+			No setup required    & \cmark & \cmark  & \xmark & \xmark & \cmark   \\
+			No root privileges   & \cmark & \cmark  & \xmark & \xmark & \cmark   \\
+			No PID~1 complexity  & \cmark & \cmark  & \cmark & \xmark & \cmark   \\
+			Exclusive groups     & \xmark & \xmark  & \xmark & \xmark & \cmark   \\
+			\bottomrule
+		\end{tabular}}
 \end{table}
 
 These requirements motivate kernel support for branch-aware process management that provides reliable termination and lightweight sibling isolation without the setup complexity of cgroups or the PID~1 overhead of PID namespaces.
@@ -191,81 +191,81 @@ These requirements motivate kernel support for branch-aware process management t
 Figure~\ref{fig:architecture} illustrates our two-component architecture for speculative execution.
 
 \begin{figure}[t]
-    \centering
-    \begin{tikzpicture}[
-        node distance=0.4cm and 0.3cm,
-        process/.style={rectangle, draw, fill=blue!20, minimum width=1.8cm, minimum height=0.6cm, font=\small},
-        syscall/.style={rectangle, draw, fill=orange!30, minimum width=2.5cm, minimum height=0.6cm, font=\small\ttfamily},
-        namespace/.style={rectangle, draw, dashed, fill=green!10, minimum width=1.6cm, minimum height=0.8cm, font=\scriptsize},
-        branch/.style={rectangle, draw, fill=yellow!20, minimum width=1.6cm, minimum height=0.6cm, font=\scriptsize},
-        base/.style={rectangle, draw, fill=gray!20, minimum width=6cm, minimum height=0.6cm, font=\small},
-        fuse/.style={rectangle, draw, fill=purple!15, minimum width=6cm, minimum height=0.6cm, font=\small},
-        arrow/.style={-{Stealth[length=2mm]}, thick},
-        label/.style={font=\scriptsize\itshape}
-    ]
-    % Parent process
-    \node[process] (parent) {Parent Process};
+	\centering
+	\begin{tikzpicture}[
+		node distance=0.4cm and 0.3cm,
+		process/.style={rectangle, draw, fill=blue!20, minimum width=1.8cm, minimum height=0.6cm, font=\small},
+		syscall/.style={rectangle, draw, fill=orange!30, minimum width=2.5cm, minimum height=0.6cm, font=\small\ttfamily},
+		namespace/.style={rectangle, draw, dashed, fill=green!10, minimum width=1.6cm, minimum height=0.8cm, font=\scriptsize},
+		branch/.style={rectangle, draw, fill=yellow!20, minimum width=1.6cm, minimum height=0.6cm, font=\scriptsize},
+		base/.style={rectangle, draw, fill=gray!20, minimum width=6cm, minimum height=0.6cm, font=\small},
+		fuse/.style={rectangle, draw, fill=purple!15, minimum width=6cm, minimum height=0.6cm, font=\small},
+		arrow/.style={-{Stealth[length=2mm]}, thick},
+		label/.style={font=\scriptsize\itshape}
+		]
+		% Parent process
+		\node[process] (parent) {Parent Process};
 
-    % branch() syscall
-    \node[syscall, below=0.5cm of parent] (syscall) {branch(N=3)};
+		% branch() syscall
+		\node[syscall, below=0.5cm of parent] (syscall) {branch(N=3)};
 
-    % Child processes
-    \node[process, below=0.8cm of syscall, xshift=-2.2cm] (child1) {Child 1};
-    \node[process, below=0.8cm of syscall] (child2) {Child 2};
-    \node[process, below=0.8cm of syscall, xshift=2.2cm] (child3) {Child 3};
+		% Child processes
+		\node[process, below=0.8cm of syscall, xshift=-2.2cm] (child1) {Child 1};
+		\node[process, below=0.8cm of syscall] (child2) {Child 2};
+		\node[process, below=0.8cm of syscall, xshift=2.2cm] (child3) {Child 3};
 
-    % Mount namespaces
-    \node[namespace, below=0.3cm of child1] (ns1) {Mount NS};
-    \node[namespace, below=0.3cm of child2] (ns2) {Mount NS};
-    \node[namespace, below=0.3cm of child3] (ns3) {Mount NS};
+		% Mount namespaces
+		\node[namespace, below=0.3cm of child1] (ns1) {Mount NS};
+		\node[namespace, below=0.3cm of child2] (ns2) {Mount NS};
+		\node[namespace, below=0.3cm of child3] (ns3) {Mount NS};
 
-    % BranchFS FUSE layer
-    \node[fuse, below=0.8cm of ns2] (fuse) {\textsc{BranchFS} (FUSE)};
+		% BranchFS FUSE layer
+		\node[fuse, below=0.8cm of ns2] (fuse) {\textsc{BranchFS} (FUSE)};
 
-    % Branches
-    \node[branch, below=0.5cm of fuse, xshift=-2.2cm] (br1) {Branch 1 ($\Delta$)};
-    \node[branch, below=0.5cm of fuse] (br2) {Branch 2 ($\Delta$)};
-    \node[branch, below=0.5cm of fuse, xshift=2.2cm] (br3) {Branch 3 ($\Delta$)};
+		% Branches
+		\node[branch, below=0.5cm of fuse, xshift=-2.2cm] (br1) {Branch 1 ($\Delta$)};
+		\node[branch, below=0.5cm of fuse] (br2) {Branch 2 ($\Delta$)};
+		\node[branch, below=0.5cm of fuse, xshift=2.2cm] (br3) {Branch 3 ($\Delta$)};
 
-    % Base directory
-    \node[base, below=0.6cm of br2] (basedir) {Base Directory (Original Files)};
+		% Base directory
+		\node[base, below=0.6cm of br2] (basedir) {Base Directory (Original Files)};
 
-    % Arrows from parent to syscall
-    \draw[arrow] (parent) -- (syscall);
+		% Arrows from parent to syscall
+		\draw[arrow] (parent) -- (syscall);
 
-    % Arrows from syscall to children (fork)
-    \draw[arrow] (syscall.south) -- ++(0,-0.2) -| (child1.north);
-    \draw[arrow] (syscall.south) -- (child2.north);
-    \draw[arrow] (syscall.south) -- ++(0,-0.2) -| (child3.north);
+		% Arrows from syscall to children (fork)
+		\draw[arrow] (syscall.south) -- ++(0,-0.2) -| (child1.north);
+		\draw[arrow] (syscall.south) -- (child2.north);
+		\draw[arrow] (syscall.south) -- ++(0,-0.2) -| (child3.north);
 
-    % Arrows from children to namespaces
-    \draw[arrow] (child1) -- (ns1);
-    \draw[arrow] (child2) -- (ns2);
-    \draw[arrow] (child3) -- (ns3);
+		% Arrows from children to namespaces
+		\draw[arrow] (child1) -- (ns1);
+		\draw[arrow] (child2) -- (ns2);
+		\draw[arrow] (child3) -- (ns3);
 
-    % Arrows from namespaces to FUSE
-    \draw[arrow] (ns1.south) -- (ns1.south |- fuse.north);
-    \draw[arrow] (ns2.south) -- (fuse.north);
-    \draw[arrow] (ns3.south) -- (ns3.south |- fuse.north);
+		% Arrows from namespaces to FUSE
+		\draw[arrow] (ns1.south) -- (ns1.south |- fuse.north);
+		\draw[arrow] (ns2.south) -- (fuse.north);
+		\draw[arrow] (ns3.south) -- (ns3.south |- fuse.north);
 
-    % Arrows from FUSE to branches
-    \draw[arrow] (fuse.south) -- ++(0,-0.1) -| (br1.north);
-    \draw[arrow] (fuse.south) -- (br2.north);
-    \draw[arrow] (fuse.south) -- ++(0,-0.1) -| (br3.north);
+		% Arrows from FUSE to branches
+		\draw[arrow] (fuse.south) -- ++(0,-0.1) -| (br1.north);
+		\draw[arrow] (fuse.south) -- (br2.north);
+		\draw[arrow] (fuse.south) -- ++(0,-0.1) -| (br3.north);
 
-    % Arrows from branches to base (CoW)
-    \draw[arrow, densely dotted] (br1.south) -- (br1.south |- basedir.north);
-    \draw[arrow, densely dotted] (br2.south) -- (basedir.north);
-    \draw[arrow, densely dotted] (br3.south) -- (br3.south |- basedir.north);
+		% Arrows from branches to base (CoW)
+		\draw[arrow, densely dotted] (br1.south) -- (br1.south |- basedir.north);
+		\draw[arrow, densely dotted] (br2.south) -- (basedir.north);
+		\draw[arrow, densely dotted] (br3.south) -- (br3.south |- basedir.north);
 
-    % Labels
-    \node[label, right=0.1cm of syscall] {creates N children};
-    \node[label, right=0.3cm of ns3] {isolated views};
-    \node[label, right=0.3cm of br3] {copy-on-write};
+		% Labels
+		\node[label, right=0.1cm of syscall] {creates N children};
+		\node[label, right=0.3cm of ns3] {isolated views};
+		\node[label, right=0.3cm of br3] {copy-on-write};
 
-    \end{tikzpicture}
-    \caption{Architecture overview. \syscall coordinates process creation and mount namespace isolation; \sys provides filesystem branching with copy-on-write semantics. Dotted arrows indicate copy-on-write fallback to base.}
-    \label{fig:architecture}
+	\end{tikzpicture}
+	\caption{Architecture overview. \syscall coordinates process creation and mount namespace isolation; \sys provides filesystem branching with copy-on-write semantics. Dotted arrows indicate copy-on-write fallback to base.}
+	\label{fig:architecture}
 \end{figure}
 
 \subsection{File-Level Copy-on-Write}
@@ -279,10 +279,10 @@ This file-level granularity is a deliberate trade-off: it is coarser than block-
 Branches form a chain from the current branch back through ancestor branches to the base directory. File lookups traverse this chain:
 
 \begin{enumerate}
-    \item Check the current branch's delta storage.
-    \item If not found, check each ancestor branch in order.
-    \item If not found in any branch, serve from the base directory.
-    \item If a \emph{tombstone marker} is encountered at any level, the file is reported as deleted.
+	\item Check the current branch's delta storage.
+	\item If not found, check each ancestor branch in order.
+	\item If not found in any branch, serve from the base directory.
+	\item If a \emph{tombstone marker} is encountered at any level, the file is reported as deleted.
 \end{enumerate}
 
 Tombstone markers are lightweight sentinel files that record deletions, ensuring deleted files do not ``reappear'' from the base directory.
@@ -351,23 +351,23 @@ long branch(int op, union branch_attr *attr,
 Table~\ref{tab:justification} summarizes why kernel support is necessary for the core capabilities.
 
 \begin{table}[t]
-    \centering
-    \caption{Justification for \syscall. Strong justifications require kernel support; weak justifications are conveniences.}
-    \label{tab:justification}
-    \begin{tabular}{lll}
-        \toprule
-        Capability & Userspace? & Justification \\
-        \midrule
-        Process termination & Cgroups only & \textbf{Strong} \\
-        Sibling isolation & PID ns only & \textbf{Strong} \\
-        Memory branching & Impossible & \textbf{Strong} \\
-        PID preservation & Impossible & \textbf{Strong} \\
-        Mount ns + branchfs & User ns trick & Weak \\
-        Parent read-only & mprotect + FUSE & Weak \\
-        Exclusive groups & Atomics & Weak \\
-        Multi-branch create & Fork loop & Weak \\
-        \bottomrule
-    \end{tabular}
+	\centering
+	\caption{Justification for \syscall. Strong justifications require kernel support; weak justifications are conveniences.}
+	\label{tab:justification}
+	\begin{tabular}{lll}
+		\toprule
+		Capability          & Userspace?      & Justification   \\
+		\midrule
+		Process termination & Cgroups only    & \textbf{Strong} \\
+		Sibling isolation   & PID ns only     & \textbf{Strong} \\
+		Memory branching    & Impossible      & \textbf{Strong} \\
+		PID preservation    & Impossible      & \textbf{Strong} \\
+		Mount ns + branchfs & User ns trick   & Weak            \\
+		Parent read-only    & mprotect + FUSE & Weak            \\
+		Exclusive groups    & Atomics         & Weak            \\
+		Multi-branch create & Fork loop       & Weak            \\
+		\bottomrule
+	\end{tabular}
 \end{table}
 
 \subsection{Operations and Flags}
@@ -444,36 +444,36 @@ All experiments run on a machine with an Intel Core i7-12700 CPU (12 cores), 32\
 Branch creation allocates only a new delta storage directory, independent of base filesystem size. We measure internal operation time (excluding CLI overhead) by instrumenting the daemon. Table~\ref{tab:branch-creation} shows that creation latency remains under 350\,$\mu$s regardless of base directory size, confirming O(1) cost.
 
 \begin{table}[t]
-    \centering
-    \caption{Branch creation latency vs.\ base directory size.}
-    \label{tab:branch-creation}
-    \begin{tabular}{rr}
-        \toprule
-        Base Size (files) & Creation Latency ($\mu$s) \\
-        \midrule
-        100 & 292 \\
-        1,000 & 317 \\
-        10,000 & 310 \\
-        \bottomrule
-    \end{tabular}
+	\centering
+	\caption{Branch creation latency vs.\ base directory size.}
+	\label{tab:branch-creation}
+	\begin{tabular}{rr}
+		\toprule
+		Base Size (files) & Creation Latency ($\mu$s) \\
+		\midrule
+		100               & 292                       \\
+		1,000             & 317                       \\
+		10,000            & 310                       \\
+		\bottomrule
+	\end{tabular}
 \end{table}
 
 \paragraph{Microbenchmark: Commit and Abort.}
 Commit overhead is proportional to modified data volume, not total filesystem size. For small modifications, commit completes in under 1\,ms. Abort is similarly fast since it only removes delta storage without copying files back to the base directory. Table~\ref{tab:commit} shows commit and abort latencies for various modification sizes.
 
 \begin{table}[t]
-    \centering
-    \caption{Commit and abort latency vs.\ modification size.}
-    \label{tab:commit}
-    \begin{tabular}{rrr}
-        \toprule
-        Modification Size & Commit ($\mu$s) & Abort ($\mu$s) \\
-        \midrule
-        1 KB & 317 & 315 \\
-        100 KB & 514 & 365 \\
-        1 MB & 2,100 & 890 \\
-        \bottomrule
-    \end{tabular}
+	\centering
+	\caption{Commit and abort latency vs.\ modification size.}
+	\label{tab:commit}
+	\begin{tabular}{rrr}
+		\toprule
+		Modification Size & Commit ($\mu$s) & Abort ($\mu$s) \\
+		\midrule
+		1 KB              & 317             & 315            \\
+		100 KB            & 514             & 365            \\
+		1 MB              & 2,100           & 890            \\
+		\bottomrule
+	\end{tabular}
 \end{table}
 
 \paragraph{I/O Throughput.}
