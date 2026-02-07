@@ -145,6 +145,12 @@ Table~\ref{tab:comparison} summarizes this comparison.
 		\end{tabular}}
 \end{table}
 
+Coarser-grained approaches also fall short. VM snapshot systems~\cite{qcow2,vmware-snapshots,remus,snowflock} have whole-VM granularity with memory-proportional overhead and high creation latency (milliseconds to seconds vs.\ \sys's sub-millisecond branching). Recent work targets serverless snapshot restore~\cite{firecracker,faasnap,catalyzer} but does not address branching semantics.
+
+CRIU~\cite{criu} enables checkpoint/restore but requires full state serialization and lacks incremental branching. Speculator~\cite{speculator} pioneered speculative execution with output gating in distributed file systems, but focused on distributed consistency rather than local branching.
+
+TxOS~\cite{txos} introduced OS-level transactions using copy-on-write on in-kernel data structures; however, TxOS transactions are flat (no nesting), short-lived, abort on conflict, and require deep kernel modifications. In contrast, our branches are independent workspaces that persist for arbitrary durations and operate in userspace (for \sys) or with minimal kernel changes (for \syscall).
+
 \subsection{Process Management Requirements}
 
 Beyond filesystem isolation, speculative execution requires coordinating processes across branches: (1)~reliable termination of all branch processes on commit/abort, (2)~isolation between sibling branches, and (3)~coordinated creation of multiple branches. No existing mechanism satisfies all three without significant setup complexity.
@@ -182,6 +188,12 @@ Table~\ref{tab:process-comparison} summarizes this comparison.
 \end{table}
 
 These requirements motivate kernel support for branch-aware process management that provides reliable termination and lightweight sibling isolation without the setup complexity of cgroups or the PID~1 overhead of PID namespaces.
+
+More fundamentally, Baumann et al.~\cite{fork-hotos} argue that \texttt{fork()} is no longer a good abstraction for modern systems, citing its poor composability with other OS abstractions and high overhead for large address spaces. The design of \syscall is motivated by similar observations: rather than copying entire address spaces, it creates lightweight branches with explicit resource sharing via flags (\texttt{BR\_FS}, \texttt{BR\_MEMORY}).
+
+\subsection{Container and Namespace Isolation}
+
+Linux namespaces~\cite{namespaces} provide various forms of isolation (mount, PID, network, etc.). Containers~\cite{docker} combine namespaces with cgroups~\cite{cgroups} for resource isolation, and systems like gVisor~\cite{gvisor} add additional sandboxing. MVVM~\cite{mvvm} uses WebAssembly-based containers with hardware enclaves for secure, cross-platform AI agent deployment and workspace migration. Our approach is complementary: we use mount namespaces for filesystem isolation with lightweight branch-ID-based signal barriers in \syscall, focusing on lightweight branching and rollback rather than cross-platform portability or secure enclaves.
 
 %% =============================================================================
 %% BRANCHFS DESIGN
@@ -484,25 +496,6 @@ We measure sequential read and write throughput on a 50\,MB file (64\,KB blocks)
 %% =============================================================================
 \section{Related Work}
 
-\paragraph{VM-Level Snapshots.}
-QEMU/KVM, VMware, and Xen~\cite{qcow2,vmware-snapshots,remus} offer whole-VM snapshots. SnowFlock~\cite{snowflock} optimized VM cloning, and recent work targets serverless snapshot restore~\cite{firecracker,faasnap,catalyzer}. However, VM-level snapshots have whole-VM granularity (memory-proportional overhead), severe I/O degradation under deep snapshot chains, and high creation/restore latency (milliseconds to seconds vs.\ \sys's $\sim$300\,$\mu$s branch creation).
-
-\paragraph{Checkpoint/Restore.}
-CRIU~\cite{criu} enables checkpoint/restore but requires full state serialization and lacks incremental branching. Speculator~\cite{speculator} pioneered speculative execution with output gating in distributed file systems, but focused on distributed consistency rather than local branching.
-
-\paragraph{Transactional OSes.}
-TxOS~\cite{txos} introduced OS-level transactions using copy-on-write on in-kernel data structures. However, TxOS transactions are flat (no nesting), short-lived, abort on conflict, and require deep kernel modifications. In contrast, our branches are independent workspaces that persist for arbitrary durations and operate in userspace (for \sys) or with minimal kernel changes (for \syscall).
-
-\paragraph{Container and Namespace Isolation.}
-Linux namespaces~\cite{namespaces} provide various forms of isolation (mount, PID, network, etc.). Containers~\cite{docker} combine namespaces with cgroups~\cite{cgroups} for resource isolation, and systems like gVisor~\cite{gvisor} add additional sandboxing. MVVM~\cite{mvvm} uses WebAssembly-based containers with hardware enclaves for secure, cross-platform AI agent deployment and workspace migration. Our approach is complementary: we use mount namespaces for filesystem isolation with lightweight branch-ID-based signal barriers in \syscall, focusing on lightweight branching and rollback rather than cross-platform portability or secure enclaves.
-
-\paragraph{Process Management Primitives.}
-Unix process groups and sessions~\cite{apue} provide coarse-grained process grouping, but processes can escape via \texttt{setsid()} or \texttt{setpgid()}. The \texttt{clone()} syscall~\cite{clone} enables fine-grained resource sharing but requires combining multiple mechanisms (namespaces, cgroups) for reliable process management. Cgroups~\cite{cgroups} provide reliable process termination via the freezer controller but require setup and potentially root privileges. \syscall provides similar guarantees with zero setup by tracking branch membership in the kernel.
-
-\paragraph{Fork Criticism.}
-Baumann et al.~\cite{fork-hotos} argue that \texttt{fork()} is no longer a good abstraction for modern systems, citing its poor composability with other OS abstractions and high overhead for large address spaces. The design of \syscall is motivated by similar observations: rather than copying entire address spaces, it creates lightweight branches with explicit resource sharing via flags (\texttt{BR\_FS}, \texttt{BR\_MEMORY}).
-
-\paragraph{Intra-Process Isolation.}
 Light-weight contexts (lwCs)~\cite{lwc} provide independent protection domains within a process, enabling fast rollback by switching contexts. Dune~\cite{dune} uses hardware virtualization to give user-level processes access to privileged CPU features for sandboxing. Capsicum~\cite{capsicum} introduces capability-based sandboxing for Unix. These systems focus on isolation within or below the process boundary; \syscall instead provides isolation \emph{across} speculative branches with coordinated commit/abort semantics.
 
 %% =============================================================================
