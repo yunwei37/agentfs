@@ -58,11 +58,7 @@
 \email{yzhen165@ucsc.edu}
 
 \begin{abstract}
-AI agents increasingly rely on speculative execution: exploring multiple solution paths in parallel and committing only the successful one. This requires isolating both \emph{filesystem state} (workspace modifications) and \emph{process state} (execution context) across speculative branches, with atomic commit and rollback semantics.
-
-We present a two-component framework for agent speculative execution. First, \sys is a FUSE-based filesystem providing O(1) copy-on-write branching with nested hierarchies, commit-to-root semantics, and epoch-based sibling invalidation, all without root privileges. Second, \syscall is a proposed Linux syscall that coordinates process creation, mount namespace isolation, and branch lifecycle management, providing reliable process termination, sibling isolation, and optional memory branching.
-
-Together, these primitives enable AI agents to speculatively explore multiple approaches in parallel, with first-commit-wins semantics and minimal setup overhead. \sys is implemented and evaluated; \syscall is a design proposal. Preliminary evaluation shows O(1) branch creation (under 350\,$\mu$s), modification-proportional commit overhead, and low resource consumption.
+AI agents increasingly rely on speculative execution: exploring multiple solution paths in parallel and committing only a successful one. Because each speculative branch may modify files and spawn processes, this requires isolating both \emph{filesystem state} and \emph{process state} across branches, with atomic commit and rollback semantics. To address this, we present a two-component framework. First, \sys is a FUSE-based filesystem that gives each speculative branch an isolated copy-on-write workspace, with O(1) creation, atomic commit to the base directory, and automatic invalidation of sibling branches, all without root privileges. Second, \syscall is a proposed Linux syscall that spawns processes into isolated speculative branches with reliable termination, kernel-enforced sibling isolation, and first-commit-wins coordination. Preliminary evaluation of \sys shows sub-350\,$\mu$s branch creation independent of base filesystem size, and modification-proportional commit overhead (under 1\,ms for small changes).
 \end{abstract}
 
 \keywords{Speculative execution, AI agents, Filesystem branching, Copy-on-write, FUSE, Operating system primitives}
