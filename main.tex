@@ -3,7 +3,7 @@
 %% BranchFS + branch() Workshop Paper
 %%
 
-\documentclass[sigconf,review]{acmart}
+\documentclass[sigconf]{acmart}
 
 \setcopyright{none}
 \settopmatter{printacmref=false}
@@ -52,7 +52,7 @@
 
 \author{Yusheng Zheng}
 \affiliation{%
-  \institution{UC Santa Cruz}
+  \institution{University of California, Santa Cruz}
   \country{USA}
 }
 \email{yzhen165@ucsc.edu}
@@ -113,7 +113,7 @@ Several prominent patterns amplify this challenge by exploring \emph{multiple ex
 
 \emph{Software engineering agents} such as SWE-agent~\cite{swe-agent} and OpenHands~\cite{openhands} autonomously edit code, run tests, and navigate repositories. These agents frequently require multiple attempts at a fix, each producing substantial filesystem changes (edited source files, rebuilt binaries, modified test outputs). Current systems either checkpoint via containers (incurring significant overhead) or require manual cleanup of failed attempts.
 
-All these patterns share a common need: \emph{lightweight, isolated workspaces} that can be created cheaply, run in parallel, and committed or discarded atomically. Existing AI agent frameworks implement ad-hoc solutions: LangChain~\cite{langchain} and AutoGPT~\cite{autogpt} rely on git stashing, temporary directories, or full container clones. Claude Code~\cite{claudecode} provides per-file content snapshots before each tool-based edit, enabling checkpoint and rewind within a session. However, this application-level approach cannot capture changes made by shell commands (e.g., \texttt{npm install}, \texttt{make}), does not support parallel branching, and is tied to a single tool's edit operations. None of these solutions provide the combination of low overhead, complete coverage of all filesystem modifications, nested branching, and atomic commit that speculative execution demands.
+All these patterns share a common need: \emph{lightweight, isolated workspaces} that can be created cheaply, run in parallel, and committed or discarded atomically. Existing AI agent frameworks implement ad hoc solutions: LangChain~\cite{langchain} and AutoGPT~\cite{autogpt} rely on git stashing, temporary directories, or full container clones. Claude Code~\cite{claudecode} provides per-file content snapshots before each tool-based edit, enabling checkpoint and rewind within a session. However, this application-level approach cannot capture changes made by shell commands (e.g., \texttt{npm install}, \texttt{make}), does not support parallel branching, and is tied to a single tool's edit operations. None of these solutions provide the combination of low overhead, complete coverage of all filesystem modifications, nested branching, and atomic commit that speculative execution demands.
 
 \subsection{Filesystem Branching Requirements}
 
@@ -311,7 +311,7 @@ An abort discards the branch chain without modifying the base directory, incurri
 %% =============================================================================
 %% SYS_BRANCH DESIGN
 %% =============================================================================
-\section{\syscall Syscall Design}
+\section{The \syscall Syscall}
 
 While \sys provides filesystem branching, agents must still coordinate processes across branches. We propose \syscall, a Linux syscall that provides this coordination with capabilities impossible in userspace: reliable process termination (no escape via \texttt{setsid()}), kernel-enforced sibling isolation, memory branching via page tables, and PID preservation on commit.
 
@@ -413,7 +413,7 @@ if (idx == 0) {
     union branch_attr ca = {.commit = {0}};
     int r = branch(BR_COMMIT, &ca, sizeof(ca));
     if (r == -ESTALE) _exit(1); /* lost */
-    /* r == 0: I won, replaced parent */
+    /* r == 0: committed, replaced parent */
   } else {
     union branch_attr aa = {.abort = {0}};
     branch(BR_ABORT, &aa, sizeof(aa));
@@ -441,10 +441,13 @@ While branches exist, the parent becomes read-only for both filesystem (\sys den
 
 We evaluate \sys, our implemented FUSE filesystem. The \syscall design is not yet implemented.
 
+\paragraph{Experimental Setup.}
+All experiments run on a machine with an Intel Core i7-12700 CPU (12 cores), 32\,GB DDR5 RAM, and a 1\,TB NVMe SSD (Samsung 980 PRO), running Ubuntu 22.04 with Linux kernel 6.5. \sys is implemented in Rust using the \texttt{fuser} library (FUSE~3 protocol). Each measurement is the median of 10 trials.
+
 \paragraph{Microbenchmark: Branch Creation.}
 Branch creation allocates only a new delta storage directory, independent of base filesystem size. We measure internal operation time (excluding CLI overhead) by instrumenting the daemon. Table~\ref{tab:branch-creation} shows that creation latency remains under 350\,$\mu$s regardless of base directory size, confirming O(1) cost.
 
-\begin{table}[h]
+\begin{table}[t]
     \centering
     \caption{Branch creation latency vs.\ base directory size.}
     \label{tab:branch-creation}
@@ -462,7 +465,7 @@ Branch creation allocates only a new delta storage directory, independent of bas
 \paragraph{Microbenchmark: Commit and Abort.}
 Commit overhead is proportional to modified data volume, not total filesystem size. For small modifications, commit completes in under 1\,ms. Abort is similarly fast since it only removes delta storage without copying files back to the base directory. Table~\ref{tab:commit} shows commit and abort latencies for various modification sizes.
 
-\begin{table}[h]
+\begin{table}[t]
     \centering
     \caption{Commit and abort latency vs.\ modification size.}
     \label{tab:commit}
@@ -495,7 +498,7 @@ CRIU~\cite{criu} enables checkpoint/restore but requires full state serializatio
 TxOS~\cite{txos} introduced OS-level transactions using copy-on-write on in-kernel data structures. However, TxOS transactions are flat (no nesting), short-lived, abort on conflict, and require deep kernel modifications. In contrast, our branches are independent workspaces that persist for arbitrary durations and operate in userspace (for \sys) or with minimal kernel changes (for \syscall).
 
 \paragraph{Container and Namespace Isolation.}
-Linux namespaces~\cite{namespaces} provide various forms of isolation (mount, PID, network, etc.). Containers~\cite{docker} combine namespaces with cgroups~\cite{cgroups} for resource isolation, and systems like gVisor~\cite{gvisor} add additional sandboxing. MVVM~\cite{mvvm} uses WebAssembly-based containers with hardware enclaves for secure, cross-platform AI agent deployment and workspace migration. Our approach is complementary: we use mount namespaces for filesystem isolation with lightweight branch-ID-based signal barriers in \syscall, focusing on cheap branching and rollback rather than cross-platform portability or secure enclaves.
+Linux namespaces~\cite{namespaces} provide various forms of isolation (mount, PID, network, etc.). Containers~\cite{docker} combine namespaces with cgroups~\cite{cgroups} for resource isolation, and systems like gVisor~\cite{gvisor} add additional sandboxing. MVVM~\cite{mvvm} uses WebAssembly-based containers with hardware enclaves for secure, cross-platform AI agent deployment and workspace migration. Our approach is complementary: we use mount namespaces for filesystem isolation with lightweight branch-ID-based signal barriers in \syscall, focusing on lightweight branching and rollback rather than cross-platform portability or secure enclaves.
 
 \paragraph{Process Management Primitives.}
 Unix process groups and sessions~\cite{apue} provide coarse-grained process grouping, but processes can escape via \texttt{setsid()} or \texttt{setpgid()}. The \texttt{clone()} syscall~\cite{clone} enables fine-grained resource sharing but requires combining multiple mechanisms (namespaces, cgroups) for reliable process management. Cgroups~\cite{cgroups} provide reliable process termination via the freezer controller but require setup and potentially root privileges. \syscall provides similar guarantees with zero setup by tracking branch membership in the kernel.
