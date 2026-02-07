@@ -530,9 +530,7 @@ Current AI agents (Claude Code, SWE-agent, OpenHands) primarily checkpoint via f
 %% =============================================================================
 \section{Conclusion}
 
-We have presented a two-component framework for AI agent speculative execution. \sys is a FUSE-based filesystem providing lightweight branching with file-level copy-on-write, nested hierarchies, commit-to-root semantics, and epoch-based sibling invalidation, all without root privileges. \syscall is a proposed syscall providing coordinated process creation, reliable termination, optional sibling isolation, first-commit-wins exclusive groups, and optional memory branching.
-
-Together, these primitives address the key challenges of speculative execution: filesystem isolation (\sys), reliable process management (\syscall), and optional memory state (\texttt{BR\_MEMORY}). Preliminary evaluation of \sys shows O(1) branch creation (under 350\,$\mu$s regardless of base size) and modification-proportional commit costs (under 1\,ms for small changes), all without requiring root privileges.
+We have presented a two-component framework for AI agent speculative execution that addresses the fundamental need for isolated, reversible execution paths. \sys demonstrates that FUSE-based file-level copy-on-write, combined with mount namespaces, provides lightweight branching with O(1) creation, nested hierarchies, and atomic commit---all without root privileges. \syscall extends this with kernel-enforced process coordination, offering reliable termination and first-commit-wins semantics that are difficult or impossible to achieve in userspace. Together, these primitives provide a clean separation between filesystem isolation and process management, enabling speculative execution patterns that current agent frameworks implement only through ad hoc workarounds. Our preliminary evaluation confirms that this approach achieves O(1) branch creation and modification-proportional commit costs, making speculative execution practical for AI agent workloads.
 
 \bibliographystyle{ACM-Reference-Format}
 \bibliography{references}
