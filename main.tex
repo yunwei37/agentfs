@@ -70,26 +70,26 @@ AI agents increasingly rely on speculative execution: exploring multiple solutio
 %% =============================================================================
 \section{Introduction}
 
-Modern AI agents and automated workflows increasingly rely on speculative execution: simultaneously exploring multiple solutions before committing a successful one~\cite{autogpt,langchain,claudecode}. These workflows frequently require parallel trial-and-error, where each attempt modifies the filesystem and only one attempt ultimately succeeds.
+Modern AI agents autonomously execute multi-step tasks through a reason-then-act loop~\cite{react}, where each action (shell commands, file edits, package installations) may produce irreversible side effects. When an attempt fails, rolling back these side effects is difficult. Increasingly, agent systems explore multiple solution paths in parallel~\cite{tree-of-thoughts,reflexion,swe-agent}: for example, a software engineering agent may try several candidate fixes simultaneously, committing only the one that passes tests. This \emph{speculative execution} pattern requires isolating two types of state across parallel branches: \emph{filesystem state} (workspace modifications) and \emph{process state} (execution context), with the ability to commit successful branches and discard failed ones.
 
-The fundamental challenge is isolating these parallel modifications cheaply and rolling back failed attempts efficiently. This requires managing two types of state:
+Existing OS mechanisms do not meet these requirements. Filesystem branching primitives such as OverlayFS~\cite{overlayfs} require root privileges and lack nested branching; Btrfs~\cite{btrfs} is tied to a single filesystem type; device-mapper snapshots~\cite{dmsnapshot} require raw block devices. For process management, cgroups require setup and may require root privileges, while PID namespaces impose unnecessary overhead (Section~\ref{sec:background}). In practice, current agent frameworks resort to ad hoc solutions such as git stashing, temporary directories, or container clones~\cite{langchain,autogpt}, which incur significant overhead and cannot capture all filesystem modifications.
 
-\begin{itemize}
-    \item \textbf{Filesystem state}: Workspace modifications (files created, edited, deleted) must be isolated per branch and either committed atomically or discarded.
-    \item \textbf{Process state}: Each speculative branch runs as one or more processes that must be reliably terminated on commit or abort, isolated from sibling branches, and optionally have their memory state committed to the parent.
-\end{itemize}
-
-Existing OS mechanisms for filesystem branching and process management are insufficient (Section~\ref{sec:background}).
-
-We present a two-component framework:
+Our key observation is that FUSE-based file-level copy-on-write, combined with Linux mount namespaces, can provide lightweight speculative branching entirely in userspace without root privileges. Based on this, we present a two-component framework:
 
 \begin{enumerate}
-    \item \textbf{\sys}: A FUSE-based~\cite{fuse} filesystem providing lightweight speculative branching on top of any existing filesystem.\footnote{\sys is open-source: \url{https://github.com/multikernel/branchfs}} \sys gives AI agents isolated workspaces with O(1) branch creation via file-level copy-on-write, atomic commit of an entire branch chain to the base directory, and negligible-cost abort by discarding delta storage.
+    \item \textbf{\sys}: A FUSE-based~\cite{fuse} filesystem\footnote{\sys is open-source: \url{https://github.com/multikernel/branchfs}} that gives each speculative branch an isolated copy-on-write workspace, with O(1) creation, commit of all changes to the base directory, and automatic invalidation of sibling branches.
 
-    \item \textbf{\syscall}: A proposed Linux syscall that creates multiple processes in parallel speculative branches, each with isolated mount namespaces viewing different \sys branches. It provides reliable process termination (no escape, no race conditions), optional sibling isolation (signal/ptrace barriers), first-commit-wins exclusive groups, and optional memory branching for stateful agents.
+    \item \textbf{\syscall}: A proposed Linux syscall that spawns processes into isolated speculative branches with reliable termination, kernel-enforced sibling isolation, and first-commit-wins coordination.
 \end{enumerate}
 
-Together, these primitives enable the speculative execution patterns that AI agents require, with well-defined semantics and minimal setup.
+Preliminary evaluation of \sys shows sub-350\,$\mu$s branch creation independent of base filesystem size, and modification-proportional commit overhead (under 1\,ms for small changes).
+
+We make the following contributions:
+\begin{itemize}
+    \item The design and implementation of \sys, a FUSE-based branching filesystem with copy-on-write isolation, nested branches, and epoch-based sibling invalidation, all without root privileges.
+    \item The design of \syscall, a proposed syscall for branch-aware process coordination with reliable termination and first-commit-wins semantics.
+    \item A preliminary evaluation demonstrating the low overhead of \sys.
+\end{itemize}
 
 %% =============================================================================
 %% BACKGROUND AND MOTIVATION
