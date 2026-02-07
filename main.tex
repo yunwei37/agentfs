@@ -99,33 +99,11 @@ We make the following contributions:
 
 \subsection{AI Agent Execution Patterns}
 
-Modern AI agents follow a \emph{reason-then-act} loop~\cite{react}: the model generates a plan, executes actions (shell commands, file edits, API calls), observes the result, and iterates. Each action may produce irreversible side effects (installed packages, modified configuration files, compiled binaries), making rollback difficult when an attempt fails.
-
-Several prominent patterns amplify this challenge by exploring \emph{multiple execution paths}:
-
-\emph{Tree/Graph-of-Thoughts} reasoning~\cite{tree-of-thoughts,graph-of-thoughts} generalizes chain-of-thought prompting into a tree or graph search over candidate solutions. Multiple reasoning branches are explored in parallel and evaluated, with only the best path committed. When these branches involve tool use that modifies the filesystem, each branch requires an isolated workspace.
-
-\emph{Retry-with-reflection} agents such as Reflexion~\cite{reflexion} attempt a task, observe failure, generate a verbal self-critique, and retry. Each retry must undo the previous attempt's side effects. A branching filesystem can convert this serial pattern into parallel speculation: multiple reflection-guided attempts execute simultaneously on isolated branches.
-
-\emph{Software engineering agents} such as SWE-agent~\cite{swe-agent} and OpenHands~\cite{openhands} autonomously edit code, run tests, and navigate repositories. These agents frequently require multiple attempts at a fix, each producing substantial filesystem changes (edited source files, rebuilt binaries, modified test outputs). Current systems either checkpoint via containers (incurring significant overhead) or require manual cleanup of failed attempts.
-
-All these patterns share a common need: \emph{lightweight, isolated workspaces} that can be created cheaply, run in parallel, and committed or discarded atomically. Existing AI agent frameworks implement ad hoc solutions: LangChain~\cite{langchain} and AutoGPT~\cite{autogpt} rely on git stashing, temporary directories, or full container clones. Claude Code~\cite{claudecode} provides per-file content snapshots before each tool-based edit, enabling checkpoint and rewind within a session. However, this application-level approach cannot capture changes made by shell commands (e.g., \texttt{npm install}, \texttt{make}), does not support parallel branching, and is tied to a single tool's edit operations. None of these solutions provide the combination of low overhead, complete coverage of all filesystem modifications, nested branching, and atomic commit that speculative execution demands.
+Modern AI agents follow a \emph{reason-then-act} loop~\cite{react}, executing actions that may produce irreversible side effects. Several patterns require exploring multiple execution paths: Tree/Graph-of-Thoughts reasoning~\cite{tree-of-thoughts,graph-of-thoughts} searches over candidate solutions in parallel, Reflexion~\cite{reflexion} retries tasks after self-critique requiring undo of prior side effects, and software engineering agents such as SWE-agent~\cite{swe-agent} and OpenHands~\cite{openhands} attempt multiple fixes each producing substantial filesystem changes. These patterns share a common need for \emph{lightweight, isolated workspaces}. Current frameworks use ad hoc solutions: LangChain~\cite{langchain} and AutoGPT~\cite{autogpt} rely on git stashing, temporary directories, or container clones, while Claude Code~\cite{claudecode} provides per-file snapshots that cannot capture changes from shell commands (e.g., \texttt{npm install}) and do not support parallel branching.  None of these solutions provide the combination of low overhead, complete coverage of all filesystem modifications, nested branching, and atomic commit that speculative execution demands.
 
 \subsection{Filesystem Branching Requirements}
 
-Among the various system states managed during speculative execution, \emph{persistent file state} is particularly challenging. The agent patterns described above generate substantial filesystem changes that must be isolated across speculative branches and either committed or rolled back atomically.
-
-The core requirements for speculative filesystem branching are: (1)~portability across underlying filesystems, (2)~nested branch hierarchies, (3)~commit-to-root semantics that apply changes back to the base, and (4)~efficient invalidation of sibling branches. No existing mechanism satisfies all four.
-
-\emph{OverlayFS}~\cite{overlayfs} provides union mounts with file-level copy-on-write, layering an upper (writable) directory over a lower (read-only) directory. It is widely used for container images, where each layer adds files atop the previous one. However, OverlayFS supports only a single upper layer, preventing nested branching. It has no commit-to-root semantics (the upper layer must be manually merged), no sibling invalidation, and requires root privileges to mount.
-
-\emph{Btrfs subvolumes}~\cite{btrfs} offer block-level copy-on-write snapshots with support for nested subvolumes, making them the closest existing mechanism to hierarchical branching. Snapshots are instantaneous and space-efficient due to shared extents. However, Btrfs is tied to a single filesystem type, limiting portability. It lacks native commit-to-parent operations (merging a snapshot back requires userspace tooling such as \texttt{btrfs send/receive}), and has no mechanism for sibling invalidation.
-
-\emph{Device-mapper (DM) snapshots}~\cite{dmsnapshot} operate at the block layer, intercepting writes to a base device and redirecting them to a separate exception store. This makes them filesystem-agnostic, but they require raw block devices (not regular directories), have O(depth) read latency for deep snapshot chains as each read must traverse exception stores, and cannot atomically merge a snapshot back into its origin.
-
-\emph{DAXFS}~\cite{daxfs} is a memory-based kernel-native branching filesystem designed for multikernel architecture that provides copy-on-write branching with commit and sibling invalidation semantics similar to \sys. However, DAXFS targets memory-backed storage and is not portable across arbitrary underlying filesystems.
-
-Table~\ref{tab:comparison} summarizes this comparison.
+The core requirements for speculative filesystem branching are: (1)~portability across underlying filesystems, (2)~nested branch hierarchies, (3)~commit-to-root semantics, and (4)~efficient sibling invalidation. No existing mechanism satisfies all four (Table~\ref{tab:comparison}). OverlayFS~\cite{overlayfs} supports only a single upper layer, lacks commit-to-root and sibling invalidation, and requires root privileges. Btrfs~\cite{btrfs} supports nested subvolumes but is tied to a single filesystem type and lacks native commit-to-parent operations. Device-mapper snapshots~\cite{dmsnapshot} require raw block devices and have O(depth) read latency for deep snapshot chains. DAXFS~\cite{daxfs} provides branching with commit and sibling invalidation but targets memory-backed storage and is not portable. At coarser granularity, VM snapshot systems~\cite{qcow2,vmware-snapshots,remus,snowflock} have whole-VM overhead with high creation latency; recent serverless snapshot work~\cite{firecracker,faasnap,catalyzer} does not address branching semantics. CRIU~\cite{criu} requires full state serialization and lacks incremental branching. Speculator~\cite{speculator} pioneered speculative execution with output gating but focused on distributed consistency. TxOS~\cite{txos} introduced OS-level transactions, but they are flat (no nesting), short-lived, and require deep kernel modifications。
 
 \begin{table}[t]
 	\centering
@@ -145,25 +123,11 @@ Table~\ref{tab:comparison} summarizes this comparison.
 		\end{tabular}}
 \end{table}
 
-Coarser-grained approaches also fall short. VM snapshot systems~\cite{qcow2,vmware-snapshots,remus,snowflock} have whole-VM granularity with memory-proportional overhead and high creation latency (milliseconds to seconds vs.\ \sys's sub-millisecond branching). Recent work targets serverless snapshot restore~\cite{firecracker,faasnap,catalyzer} but does not address branching semantics.
-
-CRIU~\cite{criu} enables checkpoint/restore but requires full state serialization and lacks incremental branching. Speculator~\cite{speculator} pioneered speculative execution with output gating in distributed file systems, but focused on distributed consistency rather than local branching.
-
-TxOS~\cite{txos} introduced OS-level transactions using copy-on-write on in-kernel data structures; however, TxOS transactions are flat (no nesting), short-lived, abort on conflict, and require deep kernel modifications. In contrast, our branches are independent workspaces that persist for arbitrary durations and operate in userspace (for \sys) or with minimal kernel changes (for \syscall).
-
 \subsection{Process Management Requirements}
 
-Beyond filesystem isolation, speculative execution requires coordinating processes across branches: (1)~reliable termination of all branch processes on commit/abort, (2)~isolation between sibling branches, and (3)~coordinated creation of multiple branches. No existing mechanism satisfies all three without significant setup complexity.
-
-\emph{Process groups} (\texttt{killpg}) and \emph{sessions}~\cite{apue} allow killing a group of processes, but processes can escape via \texttt{setsid()} or \texttt{setpgid()}, making termination unreliable.
-
-\emph{Manual PID tracking} via \texttt{/proc} enumeration suffers from race conditions: processes can fork between enumeration and kill.
-
-\emph{Cgroups} with the freezer controller can reliably terminate all processes in a cgroup, but require setup (creating cgroup hierarchies), may require root privileges, and do not prevent signaling between sibling cgroups.
-
-The \texttt{clone()} syscall~\cite{clone} enables fine-grained resource sharing but requires combining multiple mechanisms for reliable process management. \emph{PID namespaces} provide complete isolation between namespaces, but add unnecessary complexity: each namespace needs a PID~1 init process to reap orphans, and the isolation is more heavyweight than necessary for sibling branches that need not signal each other.
-
-Table~\ref{tab:process-comparison} summarizes this comparison.
+Speculative execution also requires coordinating processes: (1)~reliable termination of all branch processes on commit/abort, (2)~isolation between sibling branches, and (3)~coordinated creation. No existing mechanism satisfies all three without significant complexity (Table~\ref{tab:process-comparison}). Process groups and sessions~\cite{apue} allow group termination, but processes can escape via \texttt{setsid()} or \texttt{setpgid()}. Manual PID tracking via \texttt{/proc} suffers from race conditions. Cgroups can reliably terminate processes but require setup and may need root privileges, and do not prevent signaling between siblings. The \texttt{clone()} syscall~\cite{clone} enables fine-grained resource sharing but requires combining multiple mechanisms. PID namespaces provide complete isolation but impose PID~1 init overhead. 
+These requirements motivate kernel support for branch-aware process management that provides reliable termination and lightweight sibling isolation without the setup complexity of cgroups or the PID~1 overhead of PID namespaces.
+ More fundamentally, Baumann et al.~\cite{fork-hotos} argue that \texttt{fork()} is no longer a good abstraction for modern systems; \syscall is motivated by similar observations, creating lightweight branches with explicit resource sharing via flags (\texttt{BR\_FS}, \texttt{BR\_MEMORY}).
 
 \begin{table}[t]
 	\centering
@@ -184,10 +148,6 @@ Table~\ref{tab:process-comparison} summarizes this comparison.
 			\bottomrule
 		\end{tabular}}
 \end{table}
-
-These requirements motivate kernel support for branch-aware process management that provides reliable termination and lightweight sibling isolation without the setup complexity of cgroups or the PID~1 overhead of PID namespaces.
-
-More fundamentally, Baumann et al.~\cite{fork-hotos} argue that \texttt{fork()} is no longer a good abstraction for modern systems, citing its poor composability with other OS abstractions and high overhead for large address spaces. The design of \syscall is motivated by similar observations: rather than copying entire address spaces, it creates lightweight branches with explicit resource sharing via flags (\texttt{BR\_FS}, \texttt{BR\_MEMORY}).
 
 %% =============================================================================
 %% BRANCHFS DESIGN
