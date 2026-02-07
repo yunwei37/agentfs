@@ -42,14 +42,19 @@
 
 \acmConference[Agentic OS Workshop]{Agentic OS Workshop, ASPLOS 2026}{March 23, 2026}{Pittsburgh, USA}
 
-\author{Cong Wang}
+\author{Cong Wang\thanks{Corresponding author.}}
 \affiliation{%
   \institution{Multikernel Technologies, Inc.}
-  \city{Pittsburgh}
-  \state{PA}
   \country{USA}
 }
 \email{cwang@multikernel.io}
+
+\author{Yusheng Zheng}
+\affiliation{%
+  \institution{UC Santa Cruz}
+  \country{USA}
+}
+\email{yzhen165@ucsc.edu}
 
 \begin{abstract}
 AI agents increasingly rely on speculative execution: exploring multiple solution paths in parallel and committing only the successful one. This requires isolating both \emph{filesystem state} (workspace modifications) and \emph{process state} (execution context) across speculative branches, with atomic commit and rollback semantics.
@@ -313,9 +318,9 @@ While \sys provides filesystem branching, agents must still coordinate processes
 
 The \syscall interface is designed around three principles: \emph{simplicity}, exposing only three operations (create, commit, abort) that mirror the branching lifecycle; \emph{flexibility}, allowing callers to select exactly which resources to branch via composable flags; and \emph{extensibility}, using the \texttt{bpf(2)}-style multiplexed syscall pattern so new operations and flags can be added without changing the syscall signature.
 
-The syscall takes an operation code and a union of per-operation argument structures:
+The syscall takes an operation code and a union of per-operation argument structures (Listing~\ref{lst:interface}).
 
-\begin{lstlisting}
+\begin{lstlisting}[caption={The \texttt{branch()} syscall interface.},label={lst:interface},float=tp]
 /* Operations */
 #define BR_CREATE    1  /* Create branch(es) */
 #define BR_COMMIT    2  /* Commit to parent */
@@ -386,7 +391,7 @@ Branches can create sub-branches by calling \syscall again. Each commit replaces
 
 Listing~\ref{lst:usage} shows the typical pattern for an AI agent exploring three approaches in parallel. The first branch to succeed commits its filesystem changes to the base directory; siblings receive \texttt{-ESTALE} and exit.
 
-\begin{lstlisting}[caption={Parallel speculation with first-commit-wins.},label={lst:usage},numbers=left,xleftmargin=2em]
+\begin{lstlisting}[caption={Parallel speculation with first-commit-wins.},label={lst:usage},numbers=left,xleftmargin=2em,float=tp]
 int fd = open("/mnt/workspace", O_PATH);
 pid_t pids[3];
 union branch_attr attr = {
@@ -528,10 +533,6 @@ Current AI agents (Claude Code, SWE-agent, OpenHands) primarily checkpoint via f
 We have presented a two-component framework for AI agent speculative execution. \sys is a FUSE-based filesystem providing lightweight branching with file-level copy-on-write, nested hierarchies, commit-to-root semantics, and epoch-based sibling invalidation, all without root privileges. \syscall is a proposed syscall providing coordinated process creation, reliable termination, optional sibling isolation, first-commit-wins exclusive groups, and optional memory branching.
 
 Together, these primitives address the key challenges of speculative execution: filesystem isolation (\sys), reliable process management (\syscall), and optional memory state (\texttt{BR\_MEMORY}). Preliminary evaluation of \sys shows O(1) branch creation (under 350\,$\mu$s regardless of base size) and modification-proportional commit costs (under 1\,ms for small changes), all without requiring root privileges.
-
-\begin{acks}
-We thank Yusheng Zheng for early reviews and feedback.
-\end{acks}
 
 \bibliographystyle{ACM-Reference-Format}
 \bibliography{references}
