@@ -1,0 +1,528 @@
+%%
+%% This is file `main.tex',
+%% BranchFS + branch() Workshop Paper
+%%
+
+\documentclass[sigconf,review]{acmart}
+
+%%
+%% \BibTeX command to typeset BibTeX logo in the docs
+\AtBeginDocument{%
+  \providecommand\BibTeX{{%
+    Bib\TeX}}}
+
+\usepackage{listings}
+\usepackage{xspace}
+\usepackage{pifont}
+\usepackage{tikz}
+\usetikzlibrary{shapes.geometric,arrows.meta,positioning,fit,backgrounds,calc}
+\newcommand{\cmark}{\ding{51}}
+\newcommand{\xmark}{\ding{55}}
+
+\newcommand{\sys}{\textsc{BranchFS}\xspace}
+\newcommand{\syscall}{\texttt{branch()}\xspace}
+
+\lstset{
+  basicstyle=\ttfamily\small,
+  breaklines=true,
+  frame=single,
+  language=C,
+  morekeywords={uint32_t,uint64_t,pid_t,__u32,__u64,__s32}
+}
+
+\begin{document}
+
+\title{Fork the World: OS Primitives for AI Agent Speculation}
+
+\acmConference[Agentic OS Workshop]{Agentic OS Workshop, ASPLOS 2026}{March 23, 2026}{Pittsburgh, USA}
+
+\author{Cong Wang}
+\affiliation{%
+  \institution{Multikernel Technologies, Inc.}
+}
+\email{cwang@multikernel.io}
+
+\begin{abstract}
+AI agents increasingly rely on speculative execution: exploring multiple solution paths in parallel and committing only the successful one. This requires isolating both \emph{filesystem state} (workspace modifications) and \emph{process state} (execution context) across speculative branches, with atomic commit and rollback semantics.
+
+We present a two-component framework for agent speculative execution. First, \sys is a FUSE-based filesystem providing instant copy-on-write branching with nested hierarchies, commit-to-root semantics, and epoch-based sibling invalidation, all without root privileges. Second, \syscall is a proposed Linux syscall that coordinates process creation, mount namespace isolation, and branch lifecycle management, providing reliable process termination, sibling isolation, and optional memory branching.
+
+Together, these primitives enable AI agents to speculatively explore multiple approaches in parallel, with first-commit-wins semantics and zero-setup isolation. \sys is implemented and evaluated; \syscall is a design proposal. Preliminary evaluation shows O(1) branch creation, modification-proportional commit overhead, and significant resource savings compared to existing approaches.
+\end{abstract}
+
+\keywords{Speculative execution, AI agents, Filesystem branching, Copy-on-write, FUSE, Operating system primitives}
+
+\maketitle
+
+%% =============================================================================
+%% INTRODUCTION
+%% =============================================================================
+\section{Introduction}
+
+Modern AI agents and automated workflows increasingly rely on speculative execution: simultaneously exploring multiple alternative solutions before committing the successful one~\cite{autogpt,langchain,claudecode}. Such tasks frequently require parallel trial-and-error, where each attempt modifies the filesystem and only one attempt ultimately succeeds.
+
+The fundamental challenge is isolating these parallel modifications cheaply and rolling back failed attempts instantly. This requires managing two types of state:
+
+\begin{itemize}
+    \item \textbf{Filesystem state}: Workspace modifications (files created, edited, deleted) must be isolated per branch and either committed atomically or discarded.
+    \item \textbf{Process state}: Each speculative branch runs as one or more processes that must be reliably terminated on commit or abort, isolated from sibling branches, and optionally have their memory state committed to the parent.
+\end{itemize}
+
+Existing OS mechanisms for filesystem branching and process management fall short (Section~\ref{sec:background}).
+
+In this paper, we present a two-component framework:
+
+\begin{enumerate}
+    \item \textbf{\sys}: A FUSE-based~\cite{fuse} filesystem providing lightweight speculative branching on top of any existing filesystem.\footnote{\sys is open-source: \url{https://github.com/multikernel/branchfs}} \sys gives AI agents isolated workspaces with O(1) branch creation via file-level copy-on-write, atomic commit of an entire branch chain to the base directory, and zero-cost abort by simply discarding delta storage.
+
+    \item \textbf{\syscall}: A proposed Linux syscall that creates multiple processes in parallel speculative branches, each with isolated mount namespaces viewing different \sys branches. It provides reliable process termination (no escape, no race conditions), optional sibling isolation (signal/ptrace barriers), first-commit-wins exclusive groups, and optional memory branching for stateful agents.
+\end{enumerate}
+
+Together, these primitives enable the speculative execution patterns that AI agents require, with clean semantics and minimal setup.
+
+%% =============================================================================
+%% BACKGROUND AND MOTIVATION
+%% =============================================================================
+\section{Background and Motivation}
+\label{sec:background}
+
+\subsection{AI Agent Execution Patterns}
+
+Modern AI agents follow a \emph{reason-then-act} loop~\cite{react}: the model generates a plan, executes actions (shell commands, file edits, API calls), observes the result, and iterates. Each action may produce irreversible side effects (installed packages, modified configuration files, compiled binaries), making rollback difficult when an attempt fails.
+
+Several prominent patterns amplify this challenge by exploring \emph{multiple execution paths}:
+
+\emph{Tree/Graph-of-Thoughts} reasoning~\cite{tree-of-thoughts,graph-of-thoughts} generalizes chain-of-thought prompting into a tree or graph search over candidate solutions. Multiple reasoning branches are explored in parallel and evaluated, with only the best path committed. When these branches involve tool use that modifies the filesystem, each branch requires an isolated workspace.
+
+\emph{Retry-with-reflection} agents such as Reflexion~\cite{reflexion} attempt a task, observe failure, generate a verbal self-critique, and retry. Each retry must undo the previous attempt's side effects. A branching filesystem can convert this serial pattern into parallel speculation: multiple reflection-guided attempts execute simultaneously on isolated branches.
+
+\emph{Software engineering agents} such as SWE-agent~\cite{swe-agent} and OpenHands~\cite{openhands} autonomously edit code, run tests, and navigate repositories. These agents frequently require multiple attempts at a fix, each producing substantial filesystem changes (edited source files, rebuilt binaries, modified test outputs). Current systems either checkpoint via containers (heavyweight) or accept that failed attempts must be manually cleaned up.
+
+These patterns share a common need: \emph{lightweight, isolated workspaces} that can be created cheaply, run in parallel, and either committed or discarded atomically. Existing AI agent frameworks implement ad-hoc solutions: LangChain~\cite{langchain} and AutoGPT~\cite{autogpt} rely on git stashing, temporary directories, or full container clones. Claude Code~\cite{claudecode} provides per-file content snapshots before each tool-based edit, enabling checkpoint and rewind within a session. However, this application-level approach cannot capture changes made by shell commands (e.g., \texttt{npm install}, \texttt{make}), does not support parallel branching, and is tied to a single tool's edit operations. None of these solutions provide the combination of low overhead, complete coverage of all filesystem modifications, nested branching, and atomic commit that speculative execution demands.
+
+\subsection{Filesystem Branching Requirements}
+
+Among the various system states managed during speculative execution, \emph{persistent file state} is uniquely challenging. The agent patterns described above generate substantial filesystem changes that must be isolated across speculative branches and either committed or rolled back atomically.
+
+The core requirements for speculative filesystem branching are: (1)~portability across underlying filesystems, (2)~nested branch hierarchies, (3)~commit-to-root semantics that apply changes back to the base, and (4)~efficient invalidation of sibling branches. No existing mechanism satisfies all four.
+
+\emph{OverlayFS}~\cite{overlayfs} provides union mounts with file-level copy-on-write, layering an upper (writable) directory over a lower (read-only) directory. It is widely used for container images, where each layer adds files atop the previous one. However, OverlayFS supports only a single upper layer, preventing nested branching. It has no commit-to-root semantics (the upper layer must be manually merged), no sibling invalidation, and requires root privileges to mount.
+
+\emph{Btrfs subvolumes}~\cite{btrfs} offer block-level copy-on-write snapshots with support for nested subvolumes, making them the closest existing mechanism to hierarchical branching. Snapshots are instantaneous and space-efficient due to shared extents. However, Btrfs is tied to a single filesystem type, limiting portability. It lacks native commit-to-parent operations (merging a snapshot back requires userspace tooling such as \texttt{btrfs send/receive}), and has no mechanism for sibling invalidation.
+
+\emph{Device-mapper (DM) snapshots}~\cite{dmsnapshot} operate at the block layer, intercepting writes to a base device and redirecting them to a separate exception store. This makes them filesystem-agnostic, but they require raw block devices (not regular directories), have O(depth) read latency for deep snapshot chains as each read must traverse exception stores, and cannot atomically merge a snapshot back into its origin.
+
+\emph{DAXFS}~\cite{daxfs} is a memory-based kernel-native branching filesystem designed for multikernel architecture that provides copy-on-write branching with commit and sibling invalidation semantics similar to \sys. However, DAXFS targets memory-backed storage and is not portable across arbitrary underlying filesystems.
+
+Table~\ref{tab:comparison} summarizes this comparison.
+
+\begin{table}[t]
+    \centering
+    \caption{Feature comparison of filesystem branching mechanisms.}
+    \label{tab:comparison}
+    \begin{tabular}{lccccc}
+        \toprule
+        Feature & OverlayFS & Btrfs & DM-Snap & DAXFS & \sys \\
+        \midrule
+        Portable across FSes     & \cmark & \xmark & \cmark & \xmark & \cmark \\
+        Nested branches          & \xmark & \cmark & \xmark & \cmark & \cmark \\
+        Commit-to-root           & \xmark & \xmark & \xmark & \cmark & \cmark \\
+        Sibling invalidation     & \xmark & \xmark & \xmark & \cmark & \cmark \\
+        No root privileges       & \xmark & \xmark & \xmark & \xmark & \cmark \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+\subsection{Process Management Requirements}
+
+Beyond filesystem isolation, speculative execution requires coordinating processes across branches: (1)~reliable termination of all branch processes on commit/abort, (2)~isolation between sibling branches, and (3)~coordinated creation of multiple branches. No existing mechanism satisfies all three without significant setup complexity.
+
+\emph{Process groups} (\texttt{killpg}) allow killing a group of processes, but processes can escape via \texttt{setsid()} or \texttt{setpgid()}, making termination unreliable.
+
+\emph{Sessions} provide a broader grouping, but grandchildren can create new sessions and escape.
+
+\emph{Manual PID tracking} via \texttt{/proc} enumeration suffers from race conditions: processes can fork between enumeration and kill.
+
+\emph{Cgroups} with the freezer controller can reliably terminate all processes in a cgroup, but require setup (creating cgroup hierarchies), possibly root privileges, and do not prevent signaling between sibling cgroups.
+
+\emph{PID namespaces} provide complete isolation between namespaces, but add unnecessary complexity: each namespace needs a PID~1 init process to reap orphans, and the isolation is heavier than needed for sibling branches that simply shouldn't signal each other.
+
+Table~\ref{tab:process-comparison} summarizes this comparison.
+
+\begin{table}[t]
+    \centering
+    \caption{Feature comparison of process management mechanisms for speculative branching.}
+    \label{tab:process-comparison}
+    \begin{tabular}{lccccc}
+        \toprule
+        Feature & pgrp & session & cgroup & PID ns & \syscall \\
+        \midrule
+        Reliable termination & \xmark & \xmark & \cmark & \cmark & \cmark \\
+        No escape possible   & \xmark & \xmark & \cmark & \cmark & \cmark \\
+        Sibling isolation    & \xmark & \xmark & \xmark & \cmark & \cmark \\
+        No setup required    & \cmark & \cmark & \xmark & \xmark & \cmark \\
+        No root privileges   & \cmark & \cmark & \xmark & \xmark & \cmark \\
+        No PID~1 complexity  & \cmark & \cmark & \cmark & \xmark & \cmark \\
+        Exclusive groups     & \xmark & \xmark & \xmark & \xmark & \cmark \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+These requirements motivate kernel support for branch-aware process management that provides reliable termination and lightweight sibling isolation without the setup complexity of cgroups or the PID~1 overhead of PID namespaces.
+
+%% =============================================================================
+%% BRANCHFS DESIGN
+%% =============================================================================
+\section{\sys Design and Implementation}
+
+Figure~\ref{fig:architecture} illustrates our two-component architecture for speculative execution.
+
+\begin{figure}[t]
+    \centering
+    \begin{tikzpicture}[
+        node distance=0.4cm and 0.3cm,
+        process/.style={rectangle, draw, fill=blue!20, minimum width=1.8cm, minimum height=0.6cm, font=\small},
+        syscall/.style={rectangle, draw, fill=orange!30, minimum width=2.5cm, minimum height=0.6cm, font=\small\ttfamily},
+        namespace/.style={rectangle, draw, dashed, fill=green!10, minimum width=1.6cm, minimum height=0.8cm, font=\scriptsize},
+        branch/.style={rectangle, draw, fill=yellow!20, minimum width=1.6cm, minimum height=0.6cm, font=\scriptsize},
+        base/.style={rectangle, draw, fill=gray!20, minimum width=6cm, minimum height=0.6cm, font=\small},
+        fuse/.style={rectangle, draw, fill=purple!15, minimum width=6cm, minimum height=0.6cm, font=\small},
+        arrow/.style={-{Stealth[length=2mm]}, thick},
+        label/.style={font=\scriptsize\itshape}
+    ]
+    % Parent process
+    \node[process] (parent) {Parent Process};
+
+    % branch() syscall
+    \node[syscall, below=0.5cm of parent] (syscall) {branch(N=3)};
+
+    % Child processes
+    \node[process, below=0.8cm of syscall, xshift=-2.2cm] (child1) {Child 1};
+    \node[process, below=0.8cm of syscall] (child2) {Child 2};
+    \node[process, below=0.8cm of syscall, xshift=2.2cm] (child3) {Child 3};
+
+    % Mount namespaces
+    \node[namespace, below=0.3cm of child1] (ns1) {Mount NS};
+    \node[namespace, below=0.3cm of child2] (ns2) {Mount NS};
+    \node[namespace, below=0.3cm of child3] (ns3) {Mount NS};
+
+    % BranchFS FUSE layer
+    \node[fuse, below=0.8cm of ns2] (fuse) {\textsc{BranchFS} (FUSE)};
+
+    % Branches
+    \node[branch, below=0.5cm of fuse, xshift=-2.2cm] (br1) {Branch 1 ($\Delta$)};
+    \node[branch, below=0.5cm of fuse] (br2) {Branch 2 ($\Delta$)};
+    \node[branch, below=0.5cm of fuse, xshift=2.2cm] (br3) {Branch 3 ($\Delta$)};
+
+    % Base directory
+    \node[base, below=0.6cm of br2] (basedir) {Base Directory (Original Files)};
+
+    % Arrows from parent to syscall
+    \draw[arrow] (parent) -- (syscall);
+
+    % Arrows from syscall to children (fork)
+    \draw[arrow] (syscall.south) -- ++(0,-0.2) -| (child1.north);
+    \draw[arrow] (syscall.south) -- (child2.north);
+    \draw[arrow] (syscall.south) -- ++(0,-0.2) -| (child3.north);
+
+    % Arrows from children to namespaces
+    \draw[arrow] (child1) -- (ns1);
+    \draw[arrow] (child2) -- (ns2);
+    \draw[arrow] (child3) -- (ns3);
+
+    % Arrows from namespaces to FUSE
+    \draw[arrow] (ns1.south) -- (ns1.south |- fuse.north);
+    \draw[arrow] (ns2.south) -- (fuse.north);
+    \draw[arrow] (ns3.south) -- (ns3.south |- fuse.north);
+
+    % Arrows from FUSE to branches
+    \draw[arrow] (fuse.south) -- ++(0,-0.1) -| (br1.north);
+    \draw[arrow] (fuse.south) -- (br2.north);
+    \draw[arrow] (fuse.south) -- ++(0,-0.1) -| (br3.north);
+
+    % Arrows from branches to base (CoW)
+    \draw[arrow, densely dotted] (br1.south) -- (br1.south |- basedir.north);
+    \draw[arrow, densely dotted] (br2.south) -- (basedir.north);
+    \draw[arrow, densely dotted] (br3.south) -- (br3.south |- basedir.north);
+
+    % Labels
+    \node[label, right=0.1cm of syscall] {creates N children};
+    \node[label, right=0.3cm of ns3] {isolated views};
+    \node[label, right=0.3cm of br3] {copy-on-write};
+
+    \end{tikzpicture}
+    \caption{Architecture overview. \syscall coordinates process creation and mount namespace isolation; \sys provides filesystem branching with copy-on-write semantics. Dotted arrows indicate copy-on-write fallback to base.}
+    \label{fig:architecture}
+\end{figure}
+
+\subsection{File-Level Copy-on-Write}
+
+When a file is first modified on a branch, \sys lazily copies the entire file from the base directory (or nearest ancestor branch that modified it) into the branch's delta storage. Subsequent reads and writes to that file are served entirely from the delta copy. Unmodified files are resolved by walking up the branch chain to the base directory.
+
+This file-level granularity is a deliberate trade-off: it is coarser than block-level copy-on-write but simpler to implement correctly atop FUSE, and the overhead of copying whole files is acceptable for the small-to-medium files typical of agent workloads.
+
+\subsection{Branch Chain and Resolution}
+
+Branches form a chain from the current branch back through ancestor branches to the base directory. File lookups traverse this chain:
+
+\begin{enumerate}
+    \item Check the current branch's delta storage.
+    \item If not found, check each ancestor branch in order.
+    \item If not found in any branch, serve from the base directory.
+    \item If a \emph{tombstone marker} is encountered at any level, the file is reported as deleted.
+\end{enumerate}
+
+Tombstone markers are lightweight sentinel files that record deletions, ensuring deleted files do not ``reappear'' from the base directory.
+
+\subsection{Commit and Abort Semantics}
+
+\paragraph{Commit.}
+Committing a branch applies the entire chain of changes atomically to the base directory:
+(1)~Changes are collected from the current branch through all ancestors.
+(2)~Deletions (tombstones) are applied first.
+(3)~Modified files are copied from delta storage to base.
+(4)~A global epoch counter is incremented, invalidating all sibling branches.
+(5)~Memory-mapped regions from invalidated branches trigger \texttt{SIGBUS}.
+
+\paragraph{Abort.}
+Aborting discards the branch chain without modifying the base, a zero-cost operation. Delta storage is deleted, sibling branches remain valid, and memory-mapped regions trigger \texttt{SIGBUS}.
+
+\subsection{Mount-Based Isolation and Interface}
+
+\sys exposes branch operations through a mount-based interface requiring no kernel modifications. Branches are created, committed, and aborted via a CLI tool (\texttt{branchfs create/commit/abort}) or control files (\texttt{.branchfs\_ctl}) within the filesystem. All mounts of a single \sys daemon share a single branch namespace, with each branch accessible as a virtual directory via \texttt{@branch} paths (e.g., \texttt{/mnt/workspace/@feature-a/}). Per-branch isolation for multi-agent workflows is achieved by placing each agent in its own mount namespace with only its \texttt{@branch} path bind-mounted as the workspace root, preventing agents from accessing each other's branches.
+
+%% =============================================================================
+%% SYS_BRANCH DESIGN
+%% =============================================================================
+\section{\syscall Syscall Design}
+
+While \sys provides filesystem branching, agents still need to coordinate processes across branches. We propose \syscall, a Linux syscall that provides this coordination with capabilities impossible in userspace: reliable process termination (no escape via \texttt{setsid()}), kernel-enforced sibling isolation, memory branching via page tables, and PID preservation on commit.
+
+\subsection{Interface}
+
+The \syscall interface is designed around three principles: \emph{simplicity}, exposing only three operations (create, commit, abort) that mirror the branching lifecycle; \emph{flexibility}, allowing callers to select exactly which resources to branch via composable flags; and \emph{extensibility}, using the \texttt{bpf(2)}-style multiplexed syscall pattern so new operations and flags can be added without changing the syscall signature.
+
+The syscall takes an operation code and a union of per-operation argument structures:
+
+\begin{lstlisting}
+/* Operations */
+#define BR_CREATE    1  /* Create branch(es) */
+#define BR_COMMIT    2  /* Commit to parent */
+#define BR_ABORT     3  /* Discard branch */
+
+/* Flags for BR_CREATE */
+#define BR_FS        (1 << 0)  /* Branch filesystem */
+#define BR_MEMORY    (1 << 1)  /* Branch memory */
+#define BR_ISOLATE   (1 << 2)  /* Sibling isolation */
+#define BR_CLOSE_FDS (1 << 3)  /* Close all fds */
+
+union branch_attr {
+  struct {  /* BR_CREATE */
+    __u32 flags;
+    __s32 mount_fd;
+    __u32 n_branches;
+    __u64 child_pids;  /* pid_t __user *, output */
+  } create;
+  struct {  /* BR_COMMIT */
+    __u32 flags;  /* reserved */
+  } commit;
+  struct {  /* BR_ABORT */
+    __u32 flags;  /* reserved */
+  } abort;
+};
+
+long branch(int op, union branch_attr *attr,
+            size_t size);
+\end{lstlisting}
+
+Table~\ref{tab:justification} summarizes why kernel support is necessary for the core capabilities.
+
+\begin{table}[t]
+    \centering
+    \caption{Justification for \syscall. Strong justifications require kernel support; weak justifications are conveniences.}
+    \label{tab:justification}
+    \begin{tabular}{lll}
+        \toprule
+        Capability & Userspace? & Justification \\
+        \midrule
+        Process termination & Cgroups only & \textbf{Strong} \\
+        Sibling isolation & PID ns only & \textbf{Strong} \\
+        Memory branching & Impossible & \textbf{Strong} \\
+        PID preservation & Impossible & \textbf{Strong} \\
+        Mount ns + branchfs & User ns trick & Weak \\
+        Parent read-only & mprotect + FUSE & Weak \\
+        Exclusive groups & Atomics & Weak \\
+        Multi-branch create & Fork loop & Weak \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+\subsection{Operations and Flags}
+
+\paragraph{BR\_CREATE.}
+Creates \texttt{n\_branches} child processes, each in its own branch. Returns 0 to parent (with \texttt{child\_pids} filled) and 1..$N$ to each child (branch index). All branches created in a single call form an \emph{exclusive group}: only one can commit successfully; others receive \texttt{-ESTALE}. Four flags control branch scope: \texttt{BR\_FS} (required) gives each child a new mount namespace viewing a separate \sys branch; \texttt{BR\_MEMORY} additionally branches memory via page table copy-on-write, where writes fault into child-owned pages and the parent's pages become read-only; \texttt{BR\_ISOLATE} adds kernel-enforced signal/ptrace barriers between siblings via \texttt{branch\_id} checks; \texttt{BR\_CLOSE\_FDS} closes inherited file descriptors so children re-open files in their branch context.
+
+\paragraph{BR\_COMMIT.}
+The committing branch \emph{replaces} the parent, similar to \texttt{execve()}: the branch takes over the parent's PID and continues running with its full CPU state. The parent process is terminated, and sibling branches receive \texttt{-ESTALE} on their next commit attempt. Filesystem changes are applied via mount-based operations; memory changes are committed if \texttt{BR\_MEMORY} was set.
+
+\paragraph{BR\_ABORT.}
+Discards filesystem and memory changes, terminates the branch process. If all branches abort, the parent resumes.
+
+\paragraph{Nested Branches.}
+Branches can create sub-branches by calling \syscall again. Each commit replaces the immediate parent and inherits its branch context, enabling commits to bubble up through the hierarchy.
+
+\subsection{Usage Example}
+
+Listing~\ref{lst:usage} shows the typical pattern for an AI agent exploring three approaches in parallel. The first branch to succeed commits its filesystem changes to the base directory; siblings receive \texttt{-ESTALE} and exit.
+
+\begin{lstlisting}[caption={Parallel speculation with first-commit-wins.},label={lst:usage},numbers=left,xleftmargin=2em]
+int fd = open("/mnt/workspace", O_PATH);
+pid_t pids[3];
+union branch_attr attr = {
+  .create = { .flags = BR_FS,
+               .mount_fd = fd,
+               .n_branches = 3,
+               .child_pids = (uintptr_t)pids }
+};
+int idx = branch(BR_CREATE, &attr, sizeof(attr));
+if (idx == 0) {
+  /* Parent: wait for winner */
+  while (wait(NULL) > 0);
+  /* Winner's changes now visible in base */
+} else {
+  /* Child: idx is 1, 2, or 3 */
+  bool ok = try_approach(idx);
+  if (ok) {
+    union branch_attr ca = {.commit = {0}};
+    int r = branch(BR_COMMIT, &ca, sizeof(ca));
+    if (r == -ESTALE) _exit(1); /* lost */
+    /* r == 0: I won, replaced parent */
+  } else {
+    union branch_attr aa = {.abort = {0}};
+    branch(BR_ABORT, &aa, sizeof(aa));
+    /* does not return */
+  }
+}
+\end{lstlisting}
+
+\subsection{Parent and Child Semantics}
+
+\paragraph{Parent Read-Only.}
+While branches exist, the parent becomes read-only for both filesystem (\sys denies writes) and memory (pages marked read-only, writes return \texttt{-EAGAIN}). This eliminates conflicts: the parent spawns branches and waits; on commit, the winning branch replaces it.
+
+\paragraph{Fork and Threads.}
+\texttt{fork()} within a branch is permitted: the child inherits the mount namespace (filesystem changes captured in delta) but has a separate address space (memory not part of branch state). Threads via \texttt{clone(CLONE\_VM)} share both mount namespace and address space, so their changes are part of the branch. On commit or abort, all descendants are terminated; the kernel tracks them for reliable cleanup.
+
+\subsection{Mount-Based Filesystem Integration}
+
+\syscall is designed to be filesystem-agnostic: any filesystem that exposes branch creation, commit, and abort through mount-level operations can serve as a backend. \syscall coordinates with these filesystems entirely through mount manipulation, requiring no new VFS operations. On \texttt{BR\_CREATE}, the kernel requests branch creation via the filesystem's own interface (control files for FUSE-based filesystems like \sys, remount options for kernel-native filesystems like DAXFS~\cite{daxfs}), then creates a new mount namespace for each child with its branch mounted. On \texttt{BR\_COMMIT}, the kernel triggers commit via the mount's interface, applying changes to the base and invalidating siblings. On \texttt{BR\_ABORT}, the kernel unmounts the branch, triggering delta storage cleanup. This separation means future branching filesystems need only implement the mount-based branch interface to gain full \syscall integration without any kernel modifications beyond mount namespace handling.
+
+%% =============================================================================
+%% EVALUATION
+%% =============================================================================
+\section{Preliminary Evaluation}
+
+We evaluate \sys, our implemented FUSE filesystem. \syscall is a design proposal and not yet implemented.
+
+\paragraph{Microbenchmark: Branch Creation.}
+Branch creation allocates only a new delta storage directory, independent of base filesystem size. We measure internal operation time (excluding CLI overhead) by instrumenting the daemon. Table~\ref{tab:branch-creation} shows that creation latency remains under 350\,$\mu$s regardless of base directory size, confirming O(1) cost.
+
+\begin{table}[h]
+    \centering
+    \caption{Branch creation latency vs.\ base directory size.}
+    \label{tab:branch-creation}
+    \begin{tabular}{rr}
+        \toprule
+        Base Size (files) & Creation Latency ($\mu$s) \\
+        \midrule
+        100 & 292 \\
+        1,000 & 317 \\
+        10,000 & 310 \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+\paragraph{Microbenchmark: Commit and Abort.}
+Commit overhead is proportional to modified data volume, not total filesystem size. For small modifications, commit completes in under 1\,ms. Abort is similarly fast since it only removes delta storage without copying files back to the base directory. Table~\ref{tab:commit} shows commit and abort latencies for various modification sizes.
+
+\begin{table}[h]
+    \centering
+    \caption{Commit and abort latency vs.\ modification size.}
+    \label{tab:commit}
+    \begin{tabular}{rrr}
+        \toprule
+        Modification Size & Commit ($\mu$s) & Abort ($\mu$s) \\
+        \midrule
+        1 KB & 317 & 315 \\
+        100 KB & 514 & 365 \\
+        1 MB & 2,100 & 890 \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+\paragraph{I/O Throughput.}
+We measure sequential read and write throughput on a 50\,MB file (64\,KB blocks) through the FUSE layer, compared against native filesystem throughput on the same machine. With file descriptor caching to amortize per-request \texttt{open()}/\texttt{close()} overhead, \sys achieves approximately 1.7\,GB/s read throughput (19\% of native cached reads at 8.8\,GB/s) and 680\,MB/s write throughput (comparable to the native 576\,MB/s). The read gap reflects the FUSE kernel-to-userspace roundtrip on each request; write throughput is comparable because both paths are ultimately limited by storage I/O. The recent \texttt{FOPEN\_PASSTHROUGH} feature in FUSE allows the kernel to forward I/O directly to the backing file, bypassing the daemon entirely for unmodified files; adopting this for \sys would close much of the read gap. These numbers are already more than sufficient for typical AI agent workloads where the bottleneck is LLM API latency (100ms--10s per request) rather than local file I/O.
+
+%% =============================================================================
+%% RELATED WORK
+%% =============================================================================
+\section{Related Work}
+
+\paragraph{VM-Level Snapshots.}
+Systems like QEMU/KVM (qcow2)~\cite{qcow2}, VMware~\cite{vmware-snapshots}, and Xen~\cite{remus} support whole-VM snapshots. SnowFlock~\cite{snowflock} optimized VM cloning for cloud computing, and recent work has optimized snapshot restore for serverless cold starts~\cite{firecracker,faasnap,catalyzer}. However, VM-level snapshots have whole-VM granularity (memory-proportional overhead), severe I/O degradation under deep snapshot chains, and high creation/restore latency (milliseconds to seconds vs.\ \sys's $\sim$300\,$\mu$s branch creation).
+
+\paragraph{Checkpoint/Restore.}
+CRIU~\cite{criu} enables checkpoint/restore but requires full state serialization and lacks incremental branching. Speculator~\cite{speculator} pioneered speculative execution with output gating in distributed file systems, but focused on distributed consistency rather than local branching.
+
+\paragraph{Transactional OSes.}
+TxOS~\cite{txos} introduced OS-level transactions using copy-on-write on in-kernel data structures. However, TxOS transactions are flat (no nesting), short-lived, abort on conflict, and require deep kernel modifications. In contrast, our branches are independent workspaces that coexist indefinitely and operate in userspace (for \sys) or with minimal kernel changes (for \syscall).
+
+\paragraph{Container and Namespace Isolation.}
+Linux namespaces~\cite{namespaces} provide various forms of isolation (mount, PID, network, etc.). Containers~\cite{docker} combine namespaces with cgroups~\cite{cgroups} for resource isolation, and systems like gVisor~\cite{gvisor} add additional sandboxing. MVVM~\cite{mvvm} uses WebAssembly-based containers with hardware enclaves for secure, cross-platform AI agent deployment and workspace migration. Our approach is complementary: we use mount namespaces for filesystem isolation with lightweight branch-ID-based signal barriers in \syscall, focusing on cheap branching and rollback rather than cross-platform portability or secure enclaves.
+
+\paragraph{Process Management Primitives.}
+Unix process groups and sessions~\cite{apue} provide coarse-grained process grouping, but processes can escape via \texttt{setsid()} or \texttt{setpgid()}. The \texttt{clone()} syscall~\cite{clone} enables fine-grained resource sharing but requires combining multiple mechanisms (namespaces, cgroups) for reliable process management. Cgroups~\cite{cgroups} provide reliable process termination via the freezer controller but require setup and potentially root privileges. \syscall provides similar guarantees with zero setup by tracking branch membership in the kernel.
+
+\paragraph{Fork Criticism.}
+Baumann et al.~\cite{fork-hotos} argue that \texttt{fork()} is no longer a good abstraction for modern systems, citing its poor composability with other OS abstractions and high overhead for large address spaces. Our \syscall shares this critique: rather than copying entire address spaces, it creates lightweight branches with explicit resource sharing via flags (\texttt{BR\_FS}, \texttt{BR\_MEMORY}).
+
+\paragraph{Intra-Process Isolation.}
+Light-weight contexts (lwCs)~\cite{lwc} provide independent protection domains within a process, enabling fast rollback by switching contexts. Dune~\cite{dune} uses hardware virtualization to give user-level processes access to privileged CPU features for sandboxing. Capsicum~\cite{capsicum} introduces capability-based sandboxing for Unix. These systems focus on isolation within or below the process boundary; \syscall instead provides isolation \emph{across} speculative branches with coordinated commit/abort semantics.
+
+%% =============================================================================
+%% DISCUSSION AND FUTURE WORK
+%% =============================================================================
+\section{Discussion and Future Work}
+
+\paragraph{Network and Device Side-Effects.}
+Our current prototype isolates only filesystem state. Speculative branches can still cause irreversible external actions via network calls, IPC, or device I/O. For example, a branch that sends an HTTP request or writes to a database cannot be rolled back by aborting the branch. A complete solution requires \emph{effect gating}: buffering or journaling external side-effects until commit, and discarding them on abort. Possible approaches include interposing on the \texttt{connect()}/\texttt{sendmsg()} syscalls to redirect network traffic through a branch-aware proxy, or using \texttt{seccomp-bpf} to block external I/O entirely within speculative branches. Agent gateway architectures such as Agentry~\cite{agentry}, which mediate all agent-to-external communication through a central gateway, provide a natural interposition point for branch-aware effect gating. Speculator~\cite{speculator} demonstrated output gating for distributed file systems; extending this to general network and device I/O within our framework is an important direction for future work.
+
+\paragraph{Merge Conflicts.}
+\sys currently supports only single-winner semantics via epoch-based invalidation: when one branch commits, all siblings are invalidated. This is sufficient for first-commit-wins speculation but cannot combine results from multiple branches. Future work will explore three levels of merge support: (1)~\emph{file-level union}, where non-overlapping file changes from multiple branches are merged automatically; (2)~\emph{conflict detection}, where overlapping changes to the same file are flagged for the agent or orchestrator to resolve; and (3)~\emph{semantic merge}, where domain-specific merge strategies (e.g., AST-level merge for source code) enable richer combination of branch results.
+
+\paragraph{\syscall Implementation.}
+\syscall is currently a design proposal. Implementation requires kernel modifications for branch-aware process termination, optional branch-ID-based signal barriers, and integration with the mount namespace layer for filesystem branching. The memory branching (\texttt{BR\_MEMORY}) feature requires additional complexity for COW commit-to-parent semantics. We plan to prototype \syscall on Linux 6.19, initially supporting \texttt{BR\_FS} and \texttt{BR\_ISOLATE}, with \texttt{BR\_MEMORY} as a follow-on effort due to the page table manipulation involved.
+
+\paragraph{Edge Cases and Limitations.}
+\sys operates at file-level granularity, which introduces known limitations. Symlinks are copied as-is into delta storage, so a symlink targeting an absolute path outside the branch will resolve to the unbranched file. Hardlinks are broken on copy-on-write: modifying a hardlinked file creates an independent delta copy, losing the link relationship. Special files (FIFOs, Unix domain sockets, device nodes) are not supported in delta storage; agents that create these within a branch will encounter errors. Additionally, if delta storage exhausts available disk space during a branch's lifetime, subsequent writes will fail with \texttt{-ENOSPC}. These limitations are acceptable for typical AI agent workloads, which primarily involve regular files, but should be addressed for general-purpose use.
+
+\paragraph{Integration with AI Agent Frameworks.}
+Current AI agents (Claude Code, SWE-agent, OpenHands) primarily checkpoint via files rather than process memory, suggesting that \texttt{BR\_FS}-only mode would cover most current use cases. The \texttt{BR\_MEMORY} flag provides future capability for agents that maintain significant in-memory state (e.g., persistent Python interpreters or large embedding caches). Integration requires minimal changes to existing frameworks: an orchestrator creates branches before dispatching tasks and commits the winner, while agents themselves run unmodified inside their branch's mount namespace.
+
+%% =============================================================================
+%% CONCLUSION
+%% =============================================================================
+\section{Conclusion}
+
+We have presented a two-component framework for AI agent speculative execution. \sys is a FUSE-based filesystem providing lightweight branching with file-level copy-on-write, nested hierarchies, commit-to-root semantics, and epoch-based sibling invalidation, all without root privileges. \syscall is a proposed syscall providing coordinated process creation, reliable termination, optional sibling isolation, first-commit-wins exclusive groups, and optional memory branching.
+
+Together, these primitives address the key challenges of speculative execution: filesystem isolation (\sys), reliable process management (\syscall), and optional memory state (\texttt{BR\_MEMORY}). Preliminary evaluation of \sys shows O(1) branch creation (under 350\,$\mu$s regardless of base size) and modification-proportional commit costs (under 1\,ms for small changes), all without requiring root privileges.
+
+\begin{acks}
+We thank Yusheng Zheng for early reviews and feedback.
+\end{acks}
+
+\bibliographystyle{ACM-Reference-Format}
+\bibliography{references}
+
+\end{document}
