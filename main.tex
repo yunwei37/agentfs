@@ -155,15 +155,13 @@ TxOS~\cite{txos} introduced OS-level transactions using copy-on-write on in-kern
 
 Beyond filesystem isolation, speculative execution requires coordinating processes across branches: (1)~reliable termination of all branch processes on commit/abort, (2)~isolation between sibling branches, and (3)~coordinated creation of multiple branches. No existing mechanism satisfies all three without significant setup complexity.
 
-\emph{Process groups} (\texttt{killpg}) allow killing a group of processes, but processes can escape via \texttt{setsid()} or \texttt{setpgid()}, making termination unreliable.
-
-\emph{Sessions} provide a broader grouping, but grandchildren can create new sessions and escape.
+\emph{Process groups} (\texttt{killpg}) and \emph{sessions}~\cite{apue} allow killing a group of processes, but processes can escape via \texttt{setsid()} or \texttt{setpgid()}, making termination unreliable.
 
 \emph{Manual PID tracking} via \texttt{/proc} enumeration suffers from race conditions: processes can fork between enumeration and kill.
 
 \emph{Cgroups} with the freezer controller can reliably terminate all processes in a cgroup, but require setup (creating cgroup hierarchies), may require root privileges, and do not prevent signaling between sibling cgroups.
 
-\emph{PID namespaces} provide complete isolation between namespaces, but add unnecessary complexity: each namespace needs a PID~1 init process to reap orphans, and the isolation is more heavyweight than necessary for sibling branches that need not signal each other.
+The \texttt{clone()} syscall~\cite{clone} enables fine-grained resource sharing but requires combining multiple mechanisms for reliable process management. \emph{PID namespaces} provide complete isolation between namespaces, but add unnecessary complexity: each namespace needs a PID~1 init process to reap orphans, and the isolation is more heavyweight than necessary for sibling branches that need not signal each other.
 
 Table~\ref{tab:process-comparison} summarizes this comparison.
 
