@@ -86,9 +86,9 @@ Preliminary evaluation of \sys shows sub-350\,$\mu$s branch creation independent
 
 We make the following contributions:
 \begin{itemize}
-	\item The design and implementation of \sys, a FUSE-based branching filesystem with copy-on-write isolation, nested branches, and epoch-based sibling invalidation, all without root privileges.
-	\item The design of \syscall, a proposed syscall for branch-aware process coordination with reliable termination and first-commit-wins semantics.
-	\item A preliminary evaluation demonstrating the low overhead of \sys.
+	\item We introduce the \emph{branch context}, a new OS abstraction for agentic exploration that provides copy-on-write state isolation, a fork/explore/commit lifecycle, first-commit-wins resolution, and nestable branches (Section~\ref{sec:branch-contexts}).
+	\item We realize branch contexts through two complementary components: \sys, a FUSE-based branching filesystem with O(1) creation and atomic commit, requiring no root privileges (Section~\ref{sec:branchfs}); and \syscall, a proposed Linux syscall for kernel-enforced process coordination with reliable termination and sibling isolation (Section~\ref{sec:branch-syscall}).
+	\item We present a preliminary evaluation of \sys demonstrating sub-350\,$\mu$s branch creation independent of base size, and modification-proportional commit overhead.
 \end{itemize}
 
 %% =============================================================================
