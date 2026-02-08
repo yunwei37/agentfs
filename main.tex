@@ -74,7 +74,7 @@ Modern AI agents autonomously execute multi-step tasks across domains such as so
 
 Existing OS mechanisms do not meet these requirements: filesystem branching primitives lack the combination of nested branching, commit semantics, and unprivileged operation, while process management mechanisms lack reliable branch-aware termination and sibling isolation (Section~\ref{sec:motivation}). In practice, current agent frameworks resort to ad hoc solutions such as git stashing, temporary directories, or container clones~\cite{langchain,autogpt}, which incur significant overhead and cannot capture all filesystem modifications.
 
-We introduce the \emph{branch context}, a new OS abstraction that captures these requirements (Section~\ref{sec:branch-contexts}). A branch context is an isolated execution environment, comprising a copy-on-write filesystem view and a process group, that follows a fork/explore/commit lifecycle with first-commit-wins resolution and support for nesting. We realize branch contexts in Linux through two complementary components:
+We introduce the \emph{branch context}, a new OS abstraction that captures these requirements (Section~\ref{sec:branch-contexts}). A branch context is an isolated execution environment, with a copy-on-write filesystem view and a process group, that follows a fork/explore/commit lifecycle with first-commit-wins resolution and support for nesting. We realize branch contexts in Linux through two complementary components:
 
 \begin{enumerate}
 	\item \textbf{\sys}: A FUSE-based~\cite{fuse} filesystem that gives each branch context an isolated copy-on-write workspace, with O(1) creation, atomic commit to the parent, and automatic sibling invalidation, all without root privileges.
@@ -82,7 +82,7 @@ We introduce the \emph{branch context}, a new OS abstraction that captures these
 	\item \textbf{\syscall}: A proposed Linux syscall that spawns processes into branch contexts with reliable termination, kernel-enforced sibling isolation, and first-commit-wins coordination.
 \end{enumerate}
 
-Preliminary evaluation of \sys shows sub-350\,$\mu$s branch creation independent of base filesystem size, and modification-proportional commit overhead (under 1\,ms for small changes).
+\noindent Preliminary evaluation shows sub-350\,$\mu$s branch creation and under 1\,ms commit for small changes (Section~\ref{sec:evaluation}).
 
 We make the following contributions:
 \begin{itemize}
@@ -99,17 +99,17 @@ We make the following contributions:
 
 \subsection{AI Agent Execution Patterns}
 
-Several agent patterns amplify the side-effect challenge introduced above by exploring multiple execution paths: Tree/Graph-of-Thoughts reasoning~\cite{tree-of-thoughts,graph-of-thoughts} searches over candidate solutions in parallel, Reflexion~\cite{reflexion} retries tasks after self-critique requiring rollback of prior side effects, and software engineering agents such as SWE-agent~\cite{swe-agent} and OpenHands~\cite{openhands} attempt multiple fixes each producing substantial filesystem changes. These patterns share a common need for \emph{lightweight, isolated workspaces}. Current frameworks use ad hoc solutions: LangChain~\cite{langchain} and AutoGPT~\cite{autogpt} rely on git stashing, temporary directories, or container clones, while Claude Code~\cite{claudecode} provides per-file snapshots that cannot capture changes from shell commands (e.g., \texttt{npm install}) and do not support parallel branching. None of these solutions adequately address the needs of agentic exploration. We identify the core requirements below and show that no existing OS mechanism satisfies them.
+Several agent patterns amplify the side-effect challenge introduced above by exploring multiple execution paths: Tree/Graph-of-Thoughts reasoning~\cite{tree-of-thoughts,graph-of-thoughts} searches over candidate solutions in parallel, Reflexion~\cite{reflexion} retries tasks after self-critique requiring rollback of prior side effects, and software engineering agents such as SWE-agent~\cite{swe-agent} and OpenHands~\cite{openhands} attempt multiple fixes each producing substantial filesystem changes. These patterns share a common need for \emph{lightweight, isolated workspaces}. Current frameworks use ad hoc solutions: LangChain~\cite{langchain} and AutoGPT~\cite{autogpt} rely on git stashing, temporary directories, or container clones, while Claude Code~\cite{claudecode} provides per-file snapshots that cannot capture changes from shell commands (e.g., \texttt{npm install}) and do not support parallel branching. None adequately meets these needs.
 
 \subsection{Requirements of Agentic Exploration}
 
-The agent patterns above impose six requirements on the underlying execution environment:
+The agent patterns above impose six requirements on the execution environment:
 
 \paragraph{R1: Isolated parallel execution.}
 Because multiple exploration paths run simultaneously and may modify the same files (e.g., editing \texttt{main.py} or running \texttt{npm install}), each path needs its own isolated view of filesystem and process state. Without isolation, concurrent modifications corrupt shared state.
 
 \paragraph{R2: Atomic commit with single-winner resolution.}
-When one path succeeds (e.g., tests pass), its changes must be applied atomically to the shared workspace. All sibling paths must be automatically invalidated, since they now operate on stale state and could silently corrupt the committed result. Failed paths must be discardable without residual side effects.
+When one path succeeds (e.g., tests pass), its changes must be applied atomically to the shared workspace. All sibling paths must be automatically invalidated, since they now operate on stale state and could silently corrupt the committed result. Failed paths must be discardable with no side effects.
 
 \paragraph{R3: Hierarchical nesting.}
 Tree-of-Thoughts and similar patterns explore hierarchically: an agent tries three strategies, each of which may try sub-variants. The execution environment must support nested branches, where each level commits to its immediate parent.
@@ -267,9 +267,9 @@ We now introduce the \emph{branch context}, a new OS abstraction that captures t
 
 \subsection{Definition}
 
-More precisely, a branch context~$b_i$ encapsulates: (1)~a filesystem view consisting of the origin's files overlaid with a copy-on-write delta layer~$\Delta_i$, and (2)~a process group whose side effects are confined to~$b_i$. Branch contexts are created in sets of~$N$ siblings from a single \emph{frozen origin}, execute independently, and resolve via atomic commit (promoting one context's changes to the parent) or abort (discarding changes).
+A branch context~$b_i$ encapsulates: (1)~a filesystem view consisting of the origin's files overlaid with a copy-on-write delta layer~$\Delta_i$, and (2)~a process group whose side effects are confined to~$b_i$. Branch contexts are created in sets of~$N$ siblings from a single \emph{frozen origin}, execute independently, and resolve via atomic commit (promoting one context's changes to the parent) or abort (discarding changes).
 
-Prior work on speculative OS execution introduced related concepts: Tapus et al.~\cite{tapus} proposed ``speculations'' for distributed fault-tolerance, where a single speculative path runs sequentially from a checkpoint and an owner process decides whether to accept results. Branch contexts differ in three key respects: they support \emph{parallel} exploration of~$N$ paths simultaneously, use \emph{competitive} first-commit-wins resolution rather than owner-decided acceptance, and target \emph{local} agent workloads rather than distributed system consistency.
+Prior work on speculative OS execution introduced related concepts: Tapus et al.~\cite{tapus} proposed ``speculations'' for distributed fault-tolerance, where a single speculative path runs sequentially from a checkpoint and an owner process decides whether to accept results. Branch contexts differ in three ways: they support \emph{parallel} exploration of~$N$ paths simultaneously, use \emph{competitive} first-commit-wins resolution rather than owner-decided acceptance, and target \emph{local} agent workloads rather than distributed system consistency.
 
 \subsection{Lifecycle: Fork, Explore, Commit}
 
@@ -279,7 +279,7 @@ Every branch context follows a three-phase lifecycle:
 $N$ branch contexts are created atomically from a frozen origin. Each context~$b_i$ receives its own copy-on-write filesystem layer and process group.
 
 \paragraph{Explore.}
-Each branch context executes independently. Filesystem modifications are captured in the per-context delta layer~$\Delta_i$ via copy-on-write. Processes within a context can spawn sub-processes, modify files, and install packages, all confined to their context.
+Each branch context executes independently. Filesystem modifications are captured in the per-context delta layer~$\Delta_i$ via copy-on-write; all process side effects are confined to the context.
 
 \paragraph{Commit/Abort.}
 When a branch context succeeds (e.g., tests pass), it \emph{commits}: its delta~$\Delta_i$ is applied atomically to the parent. A context may also \emph{abort}, discarding its delta with no effect on the parent or siblings.
@@ -293,9 +293,9 @@ Branch contexts are defined by four core semantic properties:
 
 	\item \textbf{Parallel isolated execution.} All $N$ contexts run simultaneously, not as sequential retries, and are fully isolated from one another: no context can observe or modify another's state. This enables speedup proportional to available parallelism.
 
-	\item \textbf{First-commit-wins.} Any context may commit; the first to do so wins, and all siblings are invalidated. This single-winner model avoids merge complexity and suits AI agent workloads where the orchestrator cannot predict which branch will succeed.
+	\item \textbf{First-commit-wins.} Any context may commit; the first to do so wins, and all siblings are invalidated. This avoids merge complexity and suits AI agent workloads where the orchestrator cannot predict which branch will succeed.
 
-	\item \textbf{Nested branch contexts.} A branch context may itself fork sub-contexts, forming a tree. Each level commits to its immediate parent, enabling hierarchical exploration (e.g., an agent tries three strategies, each of which tries two sub-variants). The parent can then inspect the result, do additional work, and commit upward in turn.
+	\item \textbf{Nested branch contexts.} A branch context may itself fork sub-contexts, forming a tree. Each level commits to its immediate parent, enabling hierarchical exploration (e.g., an agent tries three strategies, each of which tries two sub-variants).
 \end{enumerate}
 
 \noindent The following sections describe how we realize branch contexts: \sys (Section~\ref{sec:branchfs}) implements the filesystem dimension, and \syscall (Section~\ref{sec:branch-syscall}) implements the process coordination dimension.
@@ -543,7 +543,7 @@ We measure sequential read and write throughput on a 50\,MB file (64\,KB blocks)
 	\end{tabular}
 \end{table}
 
-With file descriptor caching to amortize per-request \texttt{open()}/\texttt{close()} overhead, regular FUSE mode achieves 1,655\,MB/s read throughput (19\% of native). The read gap reflects the FUSE kernel-to-userspace roundtrip on each request. Write throughput under FUSE slightly exceeds native because FUSE's \texttt{writeback\_cache} mode absorbs writes into the page cache before forwarding them to the daemon; for a 50\,MB workload on 8\,GB RAM this measures page-cache speed, not durable I/O. Passthrough mode (\texttt{FOPEN\_PASSTHROUGH}) bypasses the daemon for unmodified files, achieving 7,236\,MB/s read throughput (4.4$\times$ regular FUSE, 82\% of native). These numbers are sufficient for typical AI agent workloads, which are dominated by LLM API latency (100\,ms--10\,s per request) rather than local file I/O.
+With file descriptor caching, regular FUSE mode achieves 1,655\,MB/s read throughput (19\% of native); the gap reflects the FUSE kernel-to-userspace roundtrip. Write throughput slightly exceeds native because \sys treats \texttt{fsync} as a no-op for ephemeral branches (durability is enforced at commit time), avoiding the SSD sync cost. Passthrough mode (\texttt{FOPEN\_PASSTHROUGH}) bypasses the daemon for unmodified files, reaching 7,236\,MB/s read (82\% of native). These numbers suffice for agent workloads dominated by LLM API latency (100\,ms--10\,s).
 
 %% =============================================================================
 %% RELATED WORK
@@ -565,9 +565,9 @@ Speculator~\cite{speculator} pioneered speculative execution with output gating 
 Our current prototype isolates only filesystem state. External side effects (network, IPC, device I/O) are not rolled back on abort. A complete solution requires \emph{effect gating}: buffering external actions until commit and discarding them on abort. Agent gateways such as Agentry~\cite{agentry}, which mediate all agent-to-external communication through a central gateway, provide a natural interposition point, and Speculator~\cite{speculator} demonstrated output gating for distributed file systems. Extending these ideas to general-purpose I/O is future work. On the resolution side, \sys currently supports only single-winner semantics and cannot combine results from multiple branches. Future work will explore multi-branch merge, from file-level union of non-overlapping changes, through conflict detection for overlapping files, to semantic merge strategies.
 
 \paragraph{Implementation Roadmap.}
-\syscall is currently a design proposal. We plan to prototype it on Linux 6.19, initially supporting \texttt{BR\_FS} and \texttt{BR\_ISOLATE}, with memory branching (\texttt{BR\_MEMORY}) as a follow-on effort due to the page table complexity involved. On the filesystem side, \sys's file-level copy-on-write has known limitations: symlinks targeting absolute paths outside the branch resolve to unbranched files, hardlinks lose their link relationship on copy-on-write, special files (FIFOs, sockets, device nodes) are unsupported in delta layer, and disk space exhaustion causes \texttt{-ENOSPC} errors. These limitations are acceptable for typical agent workloads but should be addressed for general-purpose use.
+\syscall is currently a design proposal. We plan to prototype it on Linux 6.19, initially supporting \texttt{BR\_FS} and \texttt{BR\_ISOLATE}, with memory branching (\texttt{BR\_MEMORY}) as a follow-on effort due to the page table complexity involved. On the filesystem side, \sys's file-level copy-on-write has known limitations: symlinks targeting absolute paths outside the branch resolve to unbranched files, hardlinks lose their link relationship on copy-on-write, special files (FIFOs, sockets, device nodes) are unsupported in delta layer, and disk space exhaustion causes \texttt{-ENOSPC} errors. These suffice for agent workloads but need addressing for general use.
 
-Current agents (Claude Code, SWE-agent, OpenHands) primarily checkpoint via files rather than process memory, suggesting that \texttt{BR\_FS}-only mode covers most current use cases. The \texttt{BR\_MEMORY} flag provides future capability for agents with significant in-memory state (e.g., persistent Python interpreters or embedding caches). Integration requires minimal framework changes: the orchestrator creates branches and commits the winner, while agents run unmodified inside their branch's mount namespace.
+Current agents (Claude Code, SWE-agent, OpenHands) primarily checkpoint via files rather than process memory, suggesting that \texttt{BR\_FS}-only mode covers most current use cases. The \texttt{BR\_MEMORY} flag provides future capability for agents with significant in-memory state (e.g., persistent Python interpreters or embedding caches). Integration requires minimal changes: the orchestrator creates branches and commits the winner, while agents run unmodified inside their branch's mount namespace.
 
 Although we focus on AI agents, the fork/explore/commit abstraction generalizes: with \texttt{n\_branches=1} it provides single-branch try-and-rollback useful for package management (try an upgrade, abort if it breaks) and system configuration tuning.
 
