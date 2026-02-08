@@ -72,7 +72,7 @@
 
 Modern AI agents autonomously execute multi-step tasks through a reason-then-act loop~\cite{react}, where each action (shell commands, file edits, package installations) may produce irreversible side effects. When an attempt fails, rolling back these side effects is difficult. Increasingly, agent systems explore multiple solution paths in parallel~\cite{tree-of-thoughts,reflexion,swe-agent}: for example, a software engineering agent may try several candidate fixes simultaneously, committing only the one that passes tests. We term this pattern \emph{agentic exploration}: the autonomous, parallel pursuit of multiple solution paths with selective commitment of results. It requires isolating two types of state across parallel branches: \emph{filesystem state} (workspace modifications) and \emph{process state} (execution context), with the ability to commit successful branches and discard failed ones.
 
-Existing OS mechanisms do not meet these requirements. Filesystem branching primitives such as OverlayFS~\cite{overlayfs} require root privileges and lack nested branching; Btrfs~\cite{btrfs} is tied to a single filesystem type; device-mapper snapshots~\cite{dmsnapshot} require raw block devices. For process management, cgroups require setup and may require root privileges, while PID namespaces impose unnecessary overhead (Section~\ref{sec:motivation}). In practice, current agent frameworks resort to ad hoc solutions such as git stashing, temporary directories, or container clones~\cite{langchain,autogpt}, which incur significant overhead and cannot capture all filesystem modifications.
+Existing OS mechanisms do not meet these requirements: filesystem branching primitives lack the combination of nested branching, commit semantics, and unprivileged operation, while process management mechanisms lack reliable branch-aware termination and sibling isolation (Section~\ref{sec:motivation}). In practice, current agent frameworks resort to ad hoc solutions such as git stashing, temporary directories, or container clones~\cite{langchain,autogpt}, which incur significant overhead and cannot capture all filesystem modifications.
 
 We introduce the \emph{branch context}, a new OS abstraction that captures these requirements (Section~\ref{sec:branch-contexts}). A branch context is an isolated execution environment---comprising a copy-on-write filesystem view and a process group---that follows a fork/explore/commit lifecycle with first-commit-wins resolution and support for nesting. We realize branch contexts in Linux through two complementary components:
 
@@ -131,7 +131,7 @@ No existing OS mechanism satisfies these requirements (Tables~\ref{tab:compariso
 OverlayFS~\cite{overlayfs} supports only a single upper layer, lacks commit-to-parent and sibling invalidation, and requires root privileges. Btrfs~\cite{btrfs} supports nested subvolumes but is tied to a single filesystem type and lacks native commit-to-parent. Device-mapper snapshots~\cite{dmsnapshot} require raw block devices with O(depth) read latency. DAXFS~\cite{daxfs} provides branching with commit and sibling invalidation but targets memory-backed storage and is not portable. At coarser granularity, VM snapshot systems~\cite{qcow2,vmware-snapshots,remus,snowflock} have whole-VM overhead; recent serverless snapshot work~\cite{firecracker,faasnap,catalyzer} reduces startup latency but does not address branching semantics; and CRIU~\cite{criu} requires full state serialization---all violating R5.
 
 \paragraph{Process management.}
-Process groups and sessions~\cite{apue} allow group termination, but processes can escape via \texttt{setsid()} or \texttt{setpgid()}; manual PID tracking via \texttt{/proc} suffers from race conditions. Cgroups~\cite{cgroups} provide reliable termination but require setup and may need root privileges, and do not prevent signaling between siblings. PID namespaces provide complete isolation but impose PID~1 init overhead. The \texttt{clone()} syscall~\cite{clone} enables fine-grained resource sharing but requires combining multiple mechanisms.
+Process groups and sessions~\cite{apue} allow group termination, but processes can escape via \texttt{setsid()} or \texttt{setpgid()}; manual PID tracking via \texttt{/proc} suffers from race conditions. Cgroups~\cite{cgroups} provide reliable termination but require setup and may need root privileges, and do not prevent signaling between siblings. PID namespaces provide complete isolation but impose PID~1 init overhead. The \texttt{clone()} syscall~\cite{clone} enables fine-grained resource sharing but requires combining multiple mechanisms. None satisfies R6 in full.
 
 \begin{table}[t]
 	\centering
@@ -153,7 +153,7 @@ Process groups and sessions~\cite{apue} allow group termination, but processes c
 
 \begin{table}[t]
 	\centering
-	\caption{Feature comparison of process management mechanisms for exploratory branching.}
+	\caption{Feature comparison of process management mechanisms for agentic exploration.}
 	\label{tab:process-comparison}
 	\resizebox{\columnwidth}{!}{%
 		\begin{tabular}{lccccc}
@@ -177,7 +177,7 @@ Process groups and sessions~\cite{apue} allow group termination, but processes c
 \section{Branch Contexts}
 \label{sec:branch-contexts}
 
-We now formalize the requirements from Section~\ref{sec:motivation} as the \emph{branch context}, a new OS abstraction for agentic exploration. A branch context is an isolated execution environment---comprising a filesystem view and a process group---that provides copy-on-write state isolation (R1, R4), atomic commit with single-winner resolution (R2), nesting for hierarchical exploration (R3), lightweight unprivileged creation (R5), and coordinated process lifecycle management (R6). Figure~\ref{fig:architecture} illustrates how the two components of our framework (\sys and \syscall) realize this abstraction.
+We now introduce the \emph{branch context}, a new OS abstraction that captures the requirements from Section~\ref{sec:motivation}. A branch context is an isolated execution environment---comprising a filesystem view and a process group---that provides copy-on-write state isolation (R1, R4), atomic commit with single-winner resolution (R2), nesting for hierarchical exploration (R3), lightweight unprivileged creation (R5), and coordinated process lifecycle management (R6). Figure~\ref{fig:architecture} illustrates how the two components of our framework (\sys and \syscall) realize this abstraction.
 
 \begin{figure}[t]
 	\centering
@@ -278,7 +278,7 @@ When a branch context succeeds (e.g., tests pass), it \emph{commits}: its delta~
 
 \subsection{Core Semantics}
 
-Branch contexts are governed by four key properties:
+Branch contexts are defined by four core semantic properties:
 
 \begin{enumerate}
 	\item \textbf{Frozen origin.} The parent state becomes read-only when branch contexts exist, eliminating merge conflicts by construction. There is no concurrent modification of the origin to reconcile.
@@ -573,7 +573,7 @@ Current AI agents (Claude Code, SWE-agent, OpenHands) primarily checkpoint via f
 %% =============================================================================
 \section{Conclusion}
 
-Agentic exploration requires isolating both filesystem and process state across parallel execution paths, with atomic commit and rollback semantics. We formalize this requirement as the \emph{branch context} abstraction and present two complementary implementations. \sys is a FUSE-based filesystem that provides lightweight copy-on-write branching with O(1) creation and atomic commit-to-parent, all without root privileges. \syscall is a proposed Linux syscall for kernel-enforced process coordination with reliable termination and first-commit-wins semantics, integrating with branching filesystems through generic \texttt{FS\_IOC\_BRANCH\_*} ioctls that keep the syscall filesystem-agnostic. Preliminary evaluation shows O(1) branch creation and modification-proportional commit costs.
+Agentic exploration requires isolating both filesystem and process state across parallel execution paths, with atomic commit and rollback semantics. We introduce the \emph{branch context} abstraction to capture these requirements and present two complementary implementations in Linux. \sys is a FUSE-based filesystem that provides lightweight copy-on-write branching with O(1) creation and atomic commit-to-parent, all without root privileges. \syscall is a proposed Linux syscall for kernel-enforced process coordination with reliable termination and first-commit-wins semantics, integrating with branching filesystems through generic \texttt{FS\_IOC\_BRANCH\_*} ioctls that keep the syscall filesystem-agnostic. Preliminary evaluation shows O(1) branch creation and modification-proportional commit costs.
 
 \bibliographystyle{ACM-Reference-Format}
 \bibliography{references}
