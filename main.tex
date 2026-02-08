@@ -99,7 +99,7 @@ We make the following contributions:
 
 \subsection{AI Agent Execution Patterns}
 
-Modern AI agents follow a \emph{reason-then-act} loop~\cite{react}, executing actions that may produce irreversible side effects. Several patterns amplify this challenge by exploring multiple execution paths: Tree/Graph-of-Thoughts reasoning~\cite{tree-of-thoughts,graph-of-thoughts} searches over candidate solutions in parallel, Reflexion~\cite{reflexion} retries tasks after self-critique requiring rollback of prior side effects, and software engineering agents such as SWE-agent~\cite{swe-agent} and OpenHands~\cite{openhands} attempt multiple fixes each producing substantial filesystem changes. These patterns share a common need for \emph{lightweight, isolated workspaces}. Current frameworks use ad hoc solutions: LangChain~\cite{langchain} and AutoGPT~\cite{autogpt} rely on git stashing, temporary directories, or container clones, while Claude Code~\cite{claudecode} provides per-file snapshots that cannot capture changes from shell commands (e.g., \texttt{npm install}) and do not support parallel branching. None of these solutions adequately address the needs of agentic exploration. We identify the core requirements below and show that no existing OS mechanism satisfies them.
+Several agent patterns amplify the side-effect challenge introduced above by exploring multiple execution paths: Tree/Graph-of-Thoughts reasoning~\cite{tree-of-thoughts,graph-of-thoughts} searches over candidate solutions in parallel, Reflexion~\cite{reflexion} retries tasks after self-critique requiring rollback of prior side effects, and software engineering agents such as SWE-agent~\cite{swe-agent} and OpenHands~\cite{openhands} attempt multiple fixes each producing substantial filesystem changes. These patterns share a common need for \emph{lightweight, isolated workspaces}. Current frameworks use ad hoc solutions: LangChain~\cite{langchain} and AutoGPT~\cite{autogpt} rely on git stashing, temporary directories, or container clones, while Claude Code~\cite{claudecode} provides per-file snapshots that cannot capture changes from shell commands (e.g., \texttt{npm install}) and do not support parallel branching. None of these solutions adequately address the needs of agentic exploration. We identify the core requirements below and show that no existing OS mechanism satisfies them.
 
 \subsection{Requirements of Agentic Exploration}
 
@@ -128,10 +128,12 @@ Agents spawn processes (compilers, test runners, package managers) within each p
 No existing OS mechanism satisfies these requirements (Tables~\ref{tab:comparison} and~\ref{tab:process-comparison}).
 
 \paragraph{Filesystem branching.}
-OverlayFS~\cite{overlayfs} supports only a single upper layer, lacks commit-to-parent and sibling invalidation, and requires root privileges. Btrfs~\cite{btrfs} supports nested subvolumes but is tied to a single filesystem type and lacks native commit-to-parent. Device-mapper snapshots~\cite{dmsnapshot} require raw block devices with O(depth) read latency. DAXFS~\cite{daxfs} provides branching with commit and sibling invalidation but targets memory-backed storage and is not portable. At coarser granularity, VM snapshot systems~\cite{qcow2,vmware-snapshots,remus,snowflock} have whole-VM overhead; recent serverless snapshot work~\cite{firecracker,faasnap,catalyzer} reduces startup latency but does not address branching semantics; and CRIU~\cite{criu} requires full state serialization, all violating R5.
+OverlayFS~\cite{overlayfs} supports stacked overlays since Linux~5.0, but each layer has a single writable upper directory with no native commit-to-parent or sibling invalidation, and mounting requires root privileges. Btrfs~\cite{btrfs} and ZFS~\cite{zfs} support nested subvolumes and clones but are each tied to a single filesystem type and lack native commit-to-parent. Device-mapper snapshots~\cite{dmsnapshot} require raw block devices with O(depth) read latency. DAXFS~\cite{daxfs} provides branching with commit and sibling invalidation but targets memory-backed storage and is not portable.
+
+At coarser granularity, VM snapshot systems~\cite{qcow2,vmware-snapshots,remus,snowflock} have whole-VM overhead; recent serverless snapshot work~\cite{firecracker,faasnap,catalyzer} reduces startup latency but does not address branching semantics; and CRIU~\cite{criu} requires full state serialization, all violating R5.
 
 \paragraph{Process management.}
-Process groups and sessions~\cite{apue} allow group termination, but processes can escape via \texttt{setsid()} or \texttt{setpgid()}; manual PID tracking via \texttt{/proc} suffers from race conditions. Cgroups~\cite{cgroups} provide reliable termination but require setup and may need root privileges, and do not prevent signaling between siblings. PID namespaces provide complete isolation but impose PID~1 init overhead. The \texttt{clone()} syscall~\cite{clone} enables fine-grained resource sharing but requires combining multiple mechanisms. None satisfies R6 in full.
+Process groups and sessions~\cite{apue} allow group termination, but processes can escape via \texttt{setsid()} or \texttt{setpgid()}; manual PID tracking via \texttt{/proc} suffers from race conditions. Cgroups~\cite{cgroups} provide reliable termination but require setup and typically need root privileges (cgroup~v2 delegation via systemd can avoid root but requires prior configuration), and do not prevent signaling between siblings. PID namespaces provide complete isolation but impose PID~1 init overhead. The \texttt{clone()} syscall~\cite{clone} enables fine-grained resource sharing but requires combining multiple mechanisms. None satisfies R6 in full.
 
 \begin{table}[t]
 	\centering
@@ -140,15 +142,18 @@ Process groups and sessions~\cite{apue} allow group termination, but processes c
 	\resizebox{\columnwidth}{!}{%
 		\begin{tabular}{lccccc}
 			\toprule
-			Feature              & OverlayFS & Btrfs  & DM-Snap & DAXFS  & \sys   \\
+			Feature              & OverlayFS & Btrfs/ZFS & DM-Snap & DAXFS  & \sys   \\
 			\midrule
 			Portable across FSes & \cmark    & \xmark & \cmark  & \xmark & \cmark \\
-			Nested branches      & \xmark    & \cmark & \xmark  & \cmark & \cmark \\
+			Nested branches      & \xmark$^{*}$ & \cmark & \xmark  & \cmark & \cmark \\
 			Commit-to-parent     & \xmark    & \xmark & \xmark  & \cmark & \cmark \\
 			Sibling invalidation & \xmark    & \xmark & \xmark  & \cmark & \cmark \\
 			No root privileges   & \xmark    & \xmark & \xmark  & \xmark & \cmark \\
 			\bottomrule
 		\end{tabular}}
+
+	\smallskip
+	{\scriptsize $^{*}$Stacked overlays supported since Linux~5.0, but without commit semantics.}
 \end{table}
 
 \begin{table}[t]
@@ -164,11 +169,14 @@ Process groups and sessions~\cite{apue} allow group termination, but processes c
 			No escape possible   & \xmark & \xmark  & \cmark & \cmark & \cmark   \\
 			Sibling isolation    & \xmark & \xmark  & \xmark & \cmark & \cmark   \\
 			No setup required    & \cmark & \cmark  & \xmark & \xmark & \cmark   \\
-			No root privileges   & \cmark & \cmark  & \xmark & \xmark & \cmark   \\
+			No root privileges   & \cmark & \cmark  & \xmark$^{\dagger}$ & \xmark & \cmark   \\
 			No PID~1 complexity  & \cmark & \cmark  & \cmark & \xmark & \cmark   \\
 			Exclusive groups     & \xmark & \xmark  & \xmark & \xmark & \cmark   \\
 			\bottomrule
 		\end{tabular}}
+
+	\smallskip
+	{\scriptsize $^{\dagger}$Cgroup~v2 delegation via systemd can avoid root but requires prior configuration.}
 \end{table}
 
 %% =============================================================================
@@ -302,7 +310,7 @@ Branch contexts are defined by four core semantic properties:
 
 \subsection{File-Level Copy-on-Write}
 
-When a file is first modified on a branch, \sys copies the entire file from the base directory (or nearest ancestor branch that modified it) into the branch's delta storage. Subsequent reads and writes to that file are served entirely from the delta copy. Unmodified files are resolved by walking up the branch chain to the base directory.
+When a file is first modified on a branch, \sys copies the entire file from the base directory (or nearest ancestor branch that modified it) into the branch's delta layer (implemented as a per-branch directory on disk). Subsequent reads and writes to that file are served entirely from the delta copy. Unmodified files are resolved by walking up the branch chain to the base directory.
 
 This file-level granularity is a deliberate trade-off: it is coarser than block-level copy-on-write but simpler to implement correctly atop FUSE, and the overhead of copying whole files is acceptable for the small-to-medium files typical of agent workloads.
 
@@ -311,7 +319,7 @@ This file-level granularity is a deliberate trade-off: it is coarser than block-
 Branches form a chain from the current branch back through ancestor branches to the base directory. File lookups traverse this chain:
 
 \begin{enumerate}
-	\item Check the current branch's delta storage.
+	\item Check the current branch's delta layer.
 	\item If not found, check each ancestor branch in order.
 	\item If not found in any branch, serve from the base directory.
 	\item If a \emph{tombstone marker} is encountered at any level, the file is reported as deleted.
@@ -323,18 +331,20 @@ Tombstone markers are lightweight sentinel files that record deletions, ensuring
 
 \paragraph{Commit.}
 A commit applies a branch's changes atomically to its parent:
-(1)~Modified files and tombstones are collected from the committing branch's delta storage.
+(1)~Modified files and tombstones are collected from the committing branch's delta layer.
 (2)~Deletions (tombstones) are applied first.
-(3)~Modified files are copied from delta storage into the parent's delta storage.
+(3)~Modified files are copied from the committing branch's delta layer into the parent's delta layer.
 (4)~The parent's epoch counter is incremented, invalidating all sibling branches.
 (5)~Memory-mapped regions from invalidated branches trigger \texttt{SIGBUS}.
 
 \paragraph{Abort.}
-An abort discards the branch's delta storage without modifying the parent, incurring negligible cost. Sibling branches remain valid, and memory-mapped regions from the aborted branch trigger \texttt{SIGBUS}.
+An abort discards the branch's delta layer without modifying the parent, incurring negligible cost. Sibling branches remain valid, and memory-mapped regions from the aborted branch trigger \texttt{SIGBUS}.
 
 \subsection{Mount-Based Isolation and Interface}
 
-\sys can be used standalone, without the \syscall kernel extension. In standalone mode, branches are created, committed, and aborted via a CLI tool (\texttt{branchfs create/\allowbreak commit/\allowbreak abort}) or control files (\texttt{.branchfs\_ctl}) within the filesystem, requiring no kernel modifications. All mounts of the same \sys daemon share a single branch namespace, with each branch accessible as a virtual directory via \texttt{@branch} paths (e.g., \texttt{/mnt/workspace/@feature-a/}). Per-branch isolation for multi-agent workflows is achieved by placing each agent in its own mount namespace with only its \texttt{@branch} path bind-mounted as the workspace root, preventing agents from accessing each other's branches. When used with \syscall (Section~\ref{sec:branch-syscall}), these operations are instead driven by the kernel via \texttt{FS\_IOC\_BRANCH\_*} ioctls, and mount namespace setup is handled atomically by the syscall.
+\sys can be used standalone, without the \syscall kernel extension. In standalone mode, branches are created, committed, and aborted via a CLI tool (\texttt{branchfs create/\allowbreak commit/\allowbreak abort}) or control files (\texttt{.branchfs\_ctl}) within the filesystem, requiring no kernel modifications. All mounts of the same \sys daemon share a single branch namespace, with each branch accessible as a virtual directory via \texttt{@branch} paths (e.g., \texttt{/mnt/workspace/@feature-a/}). Per-branch isolation for multi-agent workflows is achieved by placing each agent in its own mount namespace with only its \texttt{@branch} path bind-mounted as the workspace root, preventing agents from accessing each other's branches.
+
+When used with \syscall (Section~\ref{sec:branch-syscall}), branch management is instead driven by the kernel: \syscall issues \texttt{FS\_IOC\_BRANCH\_*} ioctls to create, commit, and abort branches, and handles mount namespace setup atomically.
 
 %% =============================================================================
 %% SYS_BRANCH DESIGN
@@ -386,7 +396,7 @@ long branch(int op, union branch_attr *attr,
             size_t size);
 \end{lstlisting}
 
-Table~\ref{tab:justification} summarizes why kernel support is necessary for the core capabilities.
+Table~\ref{tab:justification} summarizes why kernel support is necessary for the core capabilities. Beyond individual capabilities, the fundamental argument for a syscall is \emph{atomic composition}: setting up cgroups, PID namespaces, mount namespaces, filesystem branches, and signal barriers in userspace is a multi-step process with race windows between steps (e.g., a process can fork between cgroup creation and migration), fragile cleanup on partial failure, and error-prone ordering dependencies. \syscall composes all of these atomically in a single call with kernel-side cleanup on failure, following the same rationale that motivated \texttt{clone()} over manual \texttt{fork()} + \texttt{unshare()} sequences.
 
 \begin{table}[t]
 	\centering
@@ -394,16 +404,16 @@ Table~\ref{tab:justification} summarizes why kernel support is necessary for the
 	\label{tab:justification}
 	\begin{tabular}{lll}
 		\toprule
-		Capability          & Userspace?      & Justification   \\
+		Capability            & Userspace?      & Justification   \\
 		\midrule
-		Process termination & Cgroups only    & \textbf{Strong} \\
-		Sibling isolation   & PID ns only     & \textbf{Strong} \\
-		Memory branching    & Impossible      & \textbf{Strong} \\
-		PID preservation    & Impossible      & \textbf{Strong} \\
-		Atomic mount setup  & User ns trick   & Weak            \\
-		Parent read-only    & mprotect + FUSE & Weak            \\
-		Exclusive groups    & Atomics         & Weak            \\
-		Multi-branch create & Fork loop       & Weak            \\
+		Atomic composition    & Impossible      & \textbf{Strong} \\
+		Memory branching      & Impossible      & \textbf{Strong} \\
+		Process termination   & Cgroups only    & \textbf{Strong} \\
+		Sibling isolation     & PID ns only     & \textbf{Strong} \\
+		Atomic mount setup    & User ns trick   & Weak            \\
+		Parent read-only      & mprotect + FUSE & Weak            \\
+		First-commit-wins     & Atomics         & Weak            \\
+		Multi-branch create   & Fork loop       & Weak            \\
 		\bottomrule
 	\end{tabular}
 \end{table}
@@ -414,7 +424,7 @@ Table~\ref{tab:justification} summarizes why kernel support is necessary for the
 Creates \texttt{n\_branches} child processes, each in its own branch. The kernel issues \texttt{FS\_IOC\_BRANCH\_CREATE} on \texttt{mount\_fd} once per child to create filesystem branches, then atomically forks each child into a new mount namespace and bind-mounts the resulting branch fd over \texttt{mount\_fd} using the new mount API (\texttt{open\_tree} + \texttt{move\_mount}). Returns 0 to the parent (with \texttt{child\_pids} filled) and $1..N$ to each child (branch index). All branches created in a single call form an \emph{exclusive group}: only one can commit successfully; others receive \texttt{-ESTALE}. Four flags control branch scope: \texttt{BR\_FS} (required) gives each child a new mount namespace with its branch mounted as the workspace; \texttt{BR\_MEMORY} additionally branches memory via page table copy-on-write, where writes fault into child-owned pages and the parent's pages become read-only; \texttt{BR\_ISOLATE} adds kernel-enforced signal/ptrace barriers between siblings via \texttt{branch\_id} checks; \texttt{BR\_CLOSE\_FDS} closes inherited file descriptors so children re-open files in their branch context.
 
 \paragraph{BR\_COMMIT.}
-The kernel first wins the exclusive group race, then issues \texttt{FS\_IOC\_BRANCH\_COMMIT} on the branch fd to apply filesystem changes, commits memory if \texttt{BR\_MEMORY} was set, terminates siblings (which receive \texttt{-ESTALE} on their next commit attempt), and finally performs PID takeover: the committing branch \emph{replaces} the parent similar to \texttt{execve()}, taking over the parent's PID and continuing with its full CPU state.
+The kernel first wins the exclusive group race, then issues \texttt{FS\_IOC\_BRANCH\_COMMIT} on the branch fd to apply filesystem changes, commits memory if \texttt{BR\_MEMORY} was set, and terminates siblings (which receive \texttt{-ESTALE} on their next commit attempt). The committing child then optionally replaces the parent (analogous to \texttt{execve()}), taking over its PID so the caller sees a single continuous process.
 
 \paragraph{BR\_ABORT.}
 The kernel issues \texttt{FS\_IOC\_BRANCH\_ABORT} on the branch fd to discard filesystem changes, then terminates the branch process. If all branches abort, the parent resumes.
@@ -479,8 +489,8 @@ We evaluate \sys, our implemented FUSE filesystem. The \syscall design is not ye
 \paragraph{Experimental Setup.}
 All experiments run on a machine with an AMD Ryzen 5 5500U CPU (6 cores, 12 threads), 8\,GB DDR4 RAM, and a 240\,GB NVMe SSD (WDC WDS240G2G0C), running Pop!\_OS 22.04 with Linux kernel 6.17. \sys is implemented in approximately 3,400 lines of Rust using the \texttt{fuser} library (FUSE~3 protocol). Each measurement is the median of 10 trials.
 
-\paragraph{Microbenchmark: Branch Creation.}
-Branch creation allocates only a new delta storage directory, independent of base filesystem size. We measure internal operation time (excluding CLI overhead) by instrumenting the daemon. Table~\ref{tab:branch-creation} shows that creation latency remains under 350\,$\mu$s, confirming O(1) cost.
+\paragraph{Branch Creation.}
+Branch creation allocates only a new delta layer directory, independent of base filesystem size. We measure internal operation time (excluding CLI overhead) by instrumenting the daemon. Table~\ref{tab:branch-creation} shows that creation latency remains under 350\,$\mu$s, confirming O(1) cost.
 
 \begin{table}[t]
 	\centering
@@ -497,8 +507,8 @@ Branch creation allocates only a new delta storage directory, independent of bas
 	\end{tabular}
 \end{table}
 
-\paragraph{Microbenchmark: Commit and Abort.}
-Commit overhead is proportional to modified data volume, not total filesystem size. For small modifications, commit completes in under 1\,ms. Abort is similarly fast since it only removes delta storage without copying files to the parent. Table~\ref{tab:commit} shows commit and abort latencies for various modification sizes.
+\paragraph{Commit and Abort.}
+Commit overhead is proportional to modified data volume, not total filesystem size. For small modifications, commit completes in under 1\,ms. Abort is similarly fast since it only removes the delta layer without copying files to the parent. Table~\ref{tab:commit} shows commit and abort latencies for various modification sizes.
 
 \begin{table}[t]
 	\centering
@@ -533,7 +543,7 @@ We measure sequential read and write throughput on a 50\,MB file (64\,KB blocks)
 	\end{tabular}
 \end{table}
 
-With file descriptor caching to amortize per-request \texttt{open()}/\texttt{close()} overhead, regular FUSE mode achieves 1,655\,MB/s read throughput (19\% of native) and 631\,MB/s write throughput (comparable to native). The read gap reflects the FUSE kernel-to-userspace roundtrip on each request. By enabling \texttt{FOPEN\_PASSTHROUGH}, which bypasses the daemon for unmodified files, passthrough mode achieves 7,236\,MB/s read throughput, a 4.4$\times$ improvement over regular FUSE and 82\% of native speed. Write throughput also improves modestly to 719\,MB/s (1.14$\times$), as writes are ultimately limited by storage I/O in both modes. These throughput numbers are sufficient for typical AI agent workloads, where the bottleneck is LLM API latency (100\,ms--10\,s per request) rather than local file I/O.
+With file descriptor caching to amortize per-request \texttt{open()}/\texttt{close()} overhead, regular FUSE mode achieves 1,655\,MB/s read throughput (19\% of native). The read gap reflects the FUSE kernel-to-userspace roundtrip on each request. Write throughput under FUSE slightly exceeds native because FUSE's \texttt{writeback\_cache} mode absorbs writes into the page cache before forwarding them to the daemon; for a 50\,MB workload on 8\,GB RAM this measures page-cache speed, not durable I/O. Passthrough mode (\texttt{FOPEN\_PASSTHROUGH}) bypasses the daemon for unmodified files, achieving 7,236\,MB/s read throughput (4.4$\times$ regular FUSE, 82\% of native). These numbers are sufficient for typical AI agent workloads, which are dominated by LLM API latency (100\,ms--10\,s per request) rather than local file I/O.
 
 %% =============================================================================
 %% RELATED WORK
@@ -555,7 +565,11 @@ Speculator~\cite{speculator} pioneered speculative execution with output gating 
 Our current prototype isolates only filesystem state. External side effects (network, IPC, device I/O) are not rolled back on abort. A complete solution requires \emph{effect gating}: buffering external actions until commit and discarding them on abort. Agent gateways such as Agentry~\cite{agentry}, which mediate all agent-to-external communication through a central gateway, provide a natural interposition point, and Speculator~\cite{speculator} demonstrated output gating for distributed file systems. Extending these ideas to general-purpose I/O is future work. On the resolution side, \sys currently supports only single-winner semantics and cannot combine results from multiple branches. Future work will explore multi-branch merge, from file-level union of non-overlapping changes, through conflict detection for overlapping files, to semantic merge strategies.
 
 \paragraph{Implementation Roadmap.}
-\syscall is currently a design proposal. We plan to prototype it on Linux 6.19, initially supporting \texttt{BR\_FS} and \texttt{BR\_ISOLATE}, with memory branching (\texttt{BR\_MEMORY}) as a follow-on effort due to the page table complexity involved. On the filesystem side, \sys's file-level copy-on-write has known limitations: symlinks targeting absolute paths outside the branch resolve to unbranched files, hardlinks lose their link relationship on copy-on-write, special files (FIFOs, sockets, device nodes) are unsupported in delta storage, and disk space exhaustion causes \texttt{-ENOSPC} errors. These limitations are acceptable for typical agent workloads but should be addressed for general-purpose use. On the framework side, current agents (Claude Code, SWE-agent, OpenHands) primarily checkpoint via files rather than process memory, suggesting that \texttt{BR\_FS}-only mode covers most current use cases. The \texttt{BR\_MEMORY} flag provides future capability for agents with significant in-memory state (e.g., persistent Python interpreters or embedding caches). Integration requires minimal framework changes: the orchestrator creates branches and commits the winner, while agents run unmodified inside their branch's mount namespace.
+\syscall is currently a design proposal. We plan to prototype it on Linux 6.19, initially supporting \texttt{BR\_FS} and \texttt{BR\_ISOLATE}, with memory branching (\texttt{BR\_MEMORY}) as a follow-on effort due to the page table complexity involved. On the filesystem side, \sys's file-level copy-on-write has known limitations: symlinks targeting absolute paths outside the branch resolve to unbranched files, hardlinks lose their link relationship on copy-on-write, special files (FIFOs, sockets, device nodes) are unsupported in delta layer, and disk space exhaustion causes \texttt{-ENOSPC} errors. These limitations are acceptable for typical agent workloads but should be addressed for general-purpose use.
+
+Current agents (Claude Code, SWE-agent, OpenHands) primarily checkpoint via files rather than process memory, suggesting that \texttt{BR\_FS}-only mode covers most current use cases. The \texttt{BR\_MEMORY} flag provides future capability for agents with significant in-memory state (e.g., persistent Python interpreters or embedding caches). Integration requires minimal framework changes: the orchestrator creates branches and commits the winner, while agents run unmodified inside their branch's mount namespace.
+
+Although we focus on AI agents, the fork/explore/commit abstraction generalizes: with \texttt{n\_branches=1} it provides single-branch try-and-rollback useful for package management (try an upgrade, abort if it breaks) and system configuration tuning.
 
 %% =============================================================================
 %% CONCLUSION
