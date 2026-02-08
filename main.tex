@@ -72,7 +72,7 @@
 
 Modern AI agents autonomously execute multi-step tasks through a reason-then-act loop~\cite{react}, where each action (shell commands, file edits, package installations) may produce irreversible side effects. When an attempt fails, rolling back these side effects is difficult. Increasingly, agent systems explore multiple solution paths in parallel~\cite{tree-of-thoughts,reflexion,swe-agent}: for example, a software engineering agent may try several candidate fixes simultaneously, committing only the one that passes tests. This \emph{exploratory execution} pattern requires isolating two types of state across parallel branches: \emph{filesystem state} (workspace modifications) and \emph{process state} (execution context), with the ability to commit successful branches and discard failed ones.
 
-Existing OS mechanisms do not meet these requirements. Filesystem branching primitives such as OverlayFS~\cite{overlayfs} require root privileges and lack nested branching; Btrfs~\cite{btrfs} is tied to a single filesystem type; device-mapper snapshots~\cite{dmsnapshot} require raw block devices. For process management, cgroups require setup and may require root privileges, while PID namespaces impose unnecessary overhead (Section~\ref{sec:background}). In practice, current agent frameworks resort to ad hoc solutions such as git stashing, temporary directories, or container clones~\cite{langchain,autogpt}, which incur significant overhead and cannot capture all filesystem modifications.
+Existing OS mechanisms do not meet these requirements. Filesystem branching primitives such as OverlayFS~\cite{overlayfs} require root privileges and lack nested branching; Btrfs~\cite{btrfs} is tied to a single filesystem type; device-mapper snapshots~\cite{dmsnapshot} require raw block devices. For process management, cgroups require setup and may require root privileges, while PID namespaces impose unnecessary overhead (Section~\ref{sec:motivation}). In practice, current agent frameworks resort to ad hoc solutions such as git stashing, temporary directories, or container clones~\cite{langchain,autogpt}, which incur significant overhead and cannot capture all filesystem modifications.
 
 We introduce the \emph{branch context}, a new OS abstraction that captures these requirements (Section~\ref{sec:branch-contexts}). A branch context is an isolated execution environment---comprising a copy-on-write filesystem view and a process group---that follows a fork/explore/commit lifecycle with first-commit-wins resolution and support for nesting. We realize branch contexts in Linux through two complementary components:
 
@@ -92,18 +92,49 @@ We make the following contributions:
 \end{itemize}
 
 %% =============================================================================
-%% BACKGROUND AND MOTIVATION
+%% MOTIVATION
 %% =============================================================================
-\section{Background and Motivation}
-\label{sec:background}
+\section{Motivation}
+\label{sec:motivation}
 
 \subsection{AI Agent Execution Patterns}
 
-Modern AI agents follow a \emph{reason-then-act} loop~\cite{react}, executing actions that may produce irreversible side effects. Several patterns amplify this challenge by exploring multiple execution paths: Tree/Graph-of-Thoughts reasoning~\cite{tree-of-thoughts,graph-of-thoughts} searches over candidate solutions in parallel, Reflexion~\cite{reflexion} retries tasks after self-critique requiring rollback of prior side effects, and software engineering agents such as SWE-agent~\cite{swe-agent} and OpenHands~\cite{openhands} attempt multiple fixes each producing substantial filesystem changes. These patterns share a common need for \emph{lightweight, isolated workspaces}. Current frameworks use ad hoc solutions: LangChain~\cite{langchain} and AutoGPT~\cite{autogpt} rely on git stashing, temporary directories, or container clones, while Claude Code~\cite{claudecode} provides per-file snapshots that cannot capture changes from shell commands (e.g., \texttt{npm install}) and do not support parallel branching. None of these solutions provide the combination of low overhead, complete coverage of all filesystem modifications, nested branching, and atomic commit that exploratory execution demands.
+Modern AI agents follow a \emph{reason-then-act} loop~\cite{react}, executing actions that may produce irreversible side effects. Several patterns amplify this challenge by exploring multiple execution paths: Tree/Graph-of-Thoughts reasoning~\cite{tree-of-thoughts,graph-of-thoughts} searches over candidate solutions in parallel, Reflexion~\cite{reflexion} retries tasks after self-critique requiring rollback of prior side effects, and software engineering agents such as SWE-agent~\cite{swe-agent} and OpenHands~\cite{openhands} attempt multiple fixes each producing substantial filesystem changes. These patterns share a common need for \emph{lightweight, isolated workspaces}. Current frameworks use ad hoc solutions: LangChain~\cite{langchain} and AutoGPT~\cite{autogpt} rely on git stashing, temporary directories, or container clones, while Claude Code~\cite{claudecode} provides per-file snapshots that cannot capture changes from shell commands (e.g., \texttt{npm install}) and do not support parallel branching. None of these solutions adequately address the needs of exploratory execution. We identify the core requirements below and show that no existing OS mechanism satisfies them.
 
-\subsection{Filesystem Branching Requirements}
+\subsection{Requirements for Agentic Exploration}
 
-The core requirements for exploratory filesystem branching are: (1)~portability across underlying filesystems, (2)~nested branch hierarchies, (3)~commit-to-parent semantics, and (4)~efficient sibling invalidation. No existing mechanism satisfies all four (Table~\ref{tab:comparison}). OverlayFS~\cite{overlayfs} supports only a single upper layer, lacks commit-to-parent and sibling invalidation, and requires root privileges. Btrfs~\cite{btrfs} supports nested subvolumes but is tied to a single filesystem type and lacks native commit-to-parent operations. Device-mapper snapshots~\cite{dmsnapshot} require raw block devices and have O(depth) read latency for deep snapshot chains. DAXFS~\cite{daxfs} provides branching with commit and sibling invalidation but targets memory-backed storage and is not portable. At coarser granularity, VM snapshot systems~\cite{qcow2,vmware-snapshots,remus,snowflock} have whole-VM overhead with high creation latency; recent serverless snapshot work~\cite{firecracker,faasnap,catalyzer} does not address branching semantics. CRIU~\cite{criu} requires full state serialization and lacks incremental branching. Among related OS abstractions, Speculator~\cite{speculator} pioneered speculative execution with output gating but focused on distributed consistency, while TxOS~\cite{txos} introduced OS-level transactions that are flat (no nesting), short-lived, and require deep kernel modifications; in contrast, our branches persist for arbitrary durations and operate entirely in userspace.
+The agent patterns above impose seven requirements on the underlying execution environment:
+
+\paragraph{R1: State isolation.}
+Because multiple exploration paths execute in parallel and may modify the same files (e.g., editing \texttt{main.py} or running \texttt{npm install}), each path needs its own isolated view of the filesystem. Without isolation, concurrent modifications corrupt shared state.
+
+\paragraph{R2: Atomic commit with rollback.}
+When one path succeeds (e.g., tests pass), its changes must be applied atomically to the shared workspace; all other paths must be discardable without residual side effects.
+
+\paragraph{R3: Sibling invalidation.}
+Once a winner commits, the remaining paths operate on stale state. The system must automatically invalidate siblings so they cannot silently corrupt the newly committed result.
+
+\paragraph{R4: Nesting.}
+Tree-of-Thoughts and similar patterns explore hierarchically: an agent tries three strategies, each of which may try sub-variants. The execution environment must support nested branches, where each level commits to its immediate parent.
+
+\paragraph{R5: Complete and portable filesystem coverage.}
+Agent actions go beyond editing source files---they run shell commands that create build artifacts, install packages, and modify dotfiles. The isolation mechanism must capture \emph{all} filesystem modifications, not just tracked files, and must work portably across underlying filesystems (ext4, XFS, NFS, etc.) since agents run in diverse environments.
+
+\paragraph{R6: Lightweight and unprivileged.}
+Agents create and discard branches frequently (e.g., per LLM reasoning step). Branch creation must be fast (sub-millisecond) and must not require root privileges, ruling out heavyweight mechanisms such as VM snapshots or privileged container runtimes.
+
+\paragraph{R7: Process coordination.}
+Agents spawn processes (compilers, test runners, package managers) within each path. On commit or abort, all processes in a branch must be reliably terminated; sibling branches must be isolated from each other to prevent cross-path interference (e.g., one branch's test runner killing another's).
+
+\subsection{Limitations of Existing Mechanisms}
+
+No existing OS mechanism satisfies these requirements (Tables~\ref{tab:comparison} and~\ref{tab:process-comparison}).
+
+\paragraph{Filesystem branching.}
+OverlayFS~\cite{overlayfs} supports only a single upper layer, lacks commit-to-parent and sibling invalidation, and requires root privileges. Btrfs~\cite{btrfs} supports nested subvolumes but is tied to a single filesystem type and lacks native commit-to-parent. Device-mapper snapshots~\cite{dmsnapshot} require raw block devices with O(depth) read latency. DAXFS~\cite{daxfs} provides branching with commit and sibling invalidation but targets memory-backed storage and is not portable. At coarser granularity, VM snapshot systems~\cite{qcow2,vmware-snapshots,remus,snowflock} have whole-VM overhead; recent serverless snapshot work~\cite{firecracker,faasnap,catalyzer} reduces startup latency but does not address branching semantics; and CRIU~\cite{criu} requires full state serialization---all violating R6.
+
+\paragraph{Process management.}
+Process groups and sessions~\cite{apue} allow group termination, but processes can escape via \texttt{setsid()} or \texttt{setpgid()}; manual PID tracking via \texttt{/proc} suffers from race conditions. Cgroups~\cite{cgroups} provide reliable termination but require setup and may need root privileges, and do not prevent signaling between siblings. PID namespaces provide complete isolation but impose PID~1 init overhead. The \texttt{clone()} syscall~\cite{clone} enables fine-grained resource sharing but requires combining multiple mechanisms.
 
 \begin{table}[t]
 	\centering
@@ -122,10 +153,6 @@ The core requirements for exploratory filesystem branching are: (1)~portability 
 			\bottomrule
 		\end{tabular}}
 \end{table}
-
-\subsection{Process Management Requirements}
-
-Speculative execution also requires coordinating processes: (1)~reliable termination of all branch processes on commit/abort, (2)~isolation between sibling branches, and (3)~coordinated creation. No existing mechanism satisfies all three without significant complexity (Table~\ref{tab:process-comparison}). Process groups and sessions~\cite{apue} allow group termination, but processes can escape via \texttt{setsid()} or \texttt{setpgid()}. Manual PID tracking via \texttt{/proc} suffers from race conditions. Cgroups can reliably terminate processes but require setup and may need root privileges, and do not prevent signaling between siblings. The \texttt{clone()} syscall~\cite{clone} enables fine-grained resource sharing but requires combining multiple mechanisms. PID namespaces provide complete isolation but impose PID~1 init overhead. These gaps motivate kernel-level support for branch-aware process management that combines reliable termination with lightweight sibling isolation. More fundamentally, Baumann et al.~\cite{fork-hotos} argue that \texttt{fork()} is no longer a good abstraction for modern systems; \syscall is motivated by similar observations, creating lightweight branches with explicit resource sharing via flags (\texttt{BR\_FS}, \texttt{BR\_MEMORY}).
 
 \begin{table}[t]
 	\centering
@@ -153,7 +180,7 @@ Speculative execution also requires coordinating processes: (1)~reliable termina
 \section{Branch Contexts}
 \label{sec:branch-contexts}
 
-We introduce the \emph{branch context} as the core abstraction for exploratory execution in modern AI agent systems. A branch context is an isolated execution environment, comprising filesystem state and process state, created for parallel exploration. Branch contexts provide copy-on-write isolation from a shared origin, atomic commit of successful results, and automatic invalidation of sibling contexts. Figure~\ref{fig:architecture} illustrates how the two components of our framework (\sys and \syscall) realize this abstraction.
+We now formalize the requirements from Section~\ref{sec:motivation} as the \emph{branch context}, a new OS abstraction for agentic exploration. A branch context is an isolated execution environment---comprising a filesystem view and a process group---that provides copy-on-write isolation from a shared origin (R1, R5), atomic commit with automatic sibling invalidation (R2, R3), nesting for hierarchical exploration (R4), lightweight unprivileged creation (R6), and coordinated process lifecycle management (R7). Figure~\ref{fig:architecture} illustrates how the two components of our framework (\sys and \syscall) realize this abstraction.
 
 \begin{figure}[t]
 	\centering
@@ -520,6 +547,9 @@ Linux namespaces~\cite{namespaces} provide various forms of isolation (mount, PI
 
 \paragraph{Intra-Process Isolation.}
 Light-weight contexts (lwCs)~\cite{lwc} provide independent protection domains within a process, enabling fast rollback by switching contexts. Dune~\cite{dune} uses hardware virtualization to give user-level processes access to privileged CPU features for sandboxing. Capsicum~\cite{capsicum} introduces capability-based sandboxing for Unix. These systems focus on isolation within or below the process boundary; \syscall instead provides isolation \emph{across} branch contexts with coordinated commit/abort semantics.
+
+\paragraph{OS-Level Speculation and Transactions.}
+Speculator~\cite{speculator} pioneered speculative execution with output gating for distributed file systems, focusing on masking network latency for distributed consistency rather than agent exploration. TxOS~\cite{txos} introduced OS-level transactions with ACID semantics, but transactions are flat (no nesting), short-lived, and require deep kernel modifications. In contrast, branch contexts persist for arbitrary durations, support nesting, and operate entirely in userspace. Baumann et al.~\cite{fork-hotos} argue that \texttt{fork()} is no longer a good abstraction for modern systems; \syscall is motivated by similar observations, creating lightweight branches with explicit resource sharing via composable flags.
 
 %% =============================================================================
 %% DISCUSSION AND FUTURE WORK
