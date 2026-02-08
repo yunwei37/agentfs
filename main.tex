@@ -70,7 +70,7 @@
 %% =============================================================================
 \section{Introduction}
 
-Modern AI agents autonomously execute multi-step tasks through a reason-then-act loop~\cite{react}, where each action (shell commands, file edits, package installations) may produce irreversible side effects. When an attempt fails, rolling back these side effects is difficult. Increasingly, agent systems explore multiple solution paths in parallel~\cite{tree-of-thoughts,reflexion,swe-agent}: for example, a software engineering agent may try several candidate fixes simultaneously, committing only the one that passes tests. We term this pattern \emph{agentic exploration}: the autonomous, parallel pursuit of multiple solution paths with selective commitment of results. It requires isolating two types of state across parallel branches: \emph{filesystem state} (workspace modifications) and \emph{process state} (execution context), with the ability to commit successful branches and discard failed ones.
+Modern AI agents autonomously execute multi-step tasks through a reason-then-act loop~\cite{react}, where each action (shell commands, file edits, package installations) may produce irreversible side effects. Increasingly, agent systems explore multiple solution paths in parallel~\cite{tree-of-thoughts,reflexion,swe-agent}: for example, a software engineering agent may try several candidate fixes simultaneously, committing only the one that passes tests. We term this pattern \emph{agentic exploration}: the autonomous, parallel pursuit of multiple solution paths with selective commitment of results. It requires isolating two types of state across parallel branches: \emph{filesystem state} (workspace modifications) and \emph{process state} (execution context), with the ability to commit successful branches and discard failed ones.
 
 Existing OS mechanisms do not meet these requirements: filesystem branching primitives lack the combination of nested branching, commit semantics, and unprivileged operation, while process management mechanisms lack reliable branch-aware termination and sibling isolation (Section~\ref{sec:motivation}). In practice, current agent frameworks resort to ad hoc solutions such as git stashing, temporary directories, or container clones~\cite{langchain,autogpt}, which incur significant overhead and cannot capture all filesystem modifications.
 
@@ -265,7 +265,7 @@ Prior work on speculative OS execution introduced related concepts: Tapus et al.
 
 \subsection{Lifecycle: Fork, Explore, Commit}
 
-Every branch context follows a three-phase lifecycle that mirrors the paper title:
+Every branch context follows a three-phase lifecycle:
 
 \paragraph{Fork.}
 $N$ branch contexts are created atomically from a frozen origin. Each context~$b_i$ receives its own copy-on-write filesystem layer and process group.
@@ -281,7 +281,7 @@ When a branch context succeeds (e.g., tests pass), it \emph{commits}: its delta~
 Branch contexts are defined by four core semantic properties:
 
 \begin{enumerate}
-	\item \textbf{Frozen origin.} The parent state becomes read-only when branch contexts exist, eliminating merge conflicts by construction. There is no concurrent modification of the origin to reconcile.
+	\item \textbf{Frozen origin.} The parent state becomes read-only when branch contexts exist, eliminating merge conflicts by construction.
 
 	\item \textbf{Parallel isolated execution.} All $N$ contexts run simultaneously, not as sequential retries, and are fully isolated from one another: no context can observe or modify another's state. This enables speedup proportional to available parallelism.
 
@@ -302,7 +302,7 @@ Branch contexts are defined by four core semantic properties:
 
 \subsection{File-Level Copy-on-Write}
 
-When a file is first modified on a branch, \sys copies the entire file from the base directory upon first modification (or nearest ancestor branch that modified it) into the branch's delta storage. Subsequent reads and writes to that file are served entirely from the delta copy. Unmodified files are resolved by walking up the branch chain to the base directory.
+When a file is first modified on a branch, \sys copies the entire file from the base directory (or nearest ancestor branch that modified it) into the branch's delta storage. Subsequent reads and writes to that file are served entirely from the delta copy. Unmodified files are resolved by walking up the branch chain to the base directory.
 
 This file-level granularity is a deliberate trade-off: it is coarser than block-level copy-on-write but simpler to implement correctly atop FUSE, and the overhead of copying whole files is acceptable for the small-to-medium files typical of agent workloads.
 
@@ -420,7 +420,7 @@ The kernel first wins the exclusive group race, then issues \texttt{FS\_IOC\_BRA
 The kernel issues \texttt{FS\_IOC\_BRANCH\_ABORT} on the branch fd to discard filesystem changes, then terminates the branch process. If all branches abort, the parent resumes.
 
 \paragraph{Nested Branches.}
-Branches can create sub-branches by calling \syscall again. A commit replaces only the immediate parent and inherits its branch context; it does not automatically cascade further. The parent's parent (if any) must commit separately to propagate changes upward.
+Branches can create sub-branches by calling \syscall again. A commit replaces only the immediate parent; further propagation requires separate commits.
 
 \subsection{Usage Example}
 
@@ -480,7 +480,7 @@ We evaluate \sys, our implemented FUSE filesystem. The \syscall design is not ye
 All experiments run on a machine with an AMD Ryzen 5 5500U CPU (6 cores, 12 threads), 8\,GB DDR4 RAM, and a 240\,GB NVMe SSD (WDC WDS240G2G0C), running Pop!\_OS 22.04 with Linux kernel 6.17. \sys is implemented in approximately 3,400 lines of Rust using the \texttt{fuser} library (FUSE~3 protocol). Each measurement is the median of 10 trials.
 
 \paragraph{Microbenchmark: Branch Creation.}
-Branch creation allocates only a new delta storage directory, independent of base filesystem size. We measure internal operation time (excluding CLI overhead) by instrumenting the daemon. Table~\ref{tab:branch-creation} shows that creation latency remains under 350\,$\mu$s regardless of base directory size, confirming O(1) cost.
+Branch creation allocates only a new delta storage directory, independent of base filesystem size. We measure internal operation time (excluding CLI overhead) by instrumenting the daemon. Table~\ref{tab:branch-creation} shows that creation latency remains under 350\,$\mu$s, confirming O(1) cost.
 
 \begin{table}[t]
 	\centering
@@ -533,7 +533,7 @@ We measure sequential read and write throughput on a 50\,MB file (64\,KB blocks)
 	\end{tabular}
 \end{table}
 
-With file descriptor caching to amortize per-request \texttt{open()}/\texttt{close()} overhead, regular FUSE mode achieves 1,655\,MB/s read throughput (19\% of native) and 631\,MB/s write throughput (comparable to native). The read gap reflects the FUSE kernel-to-userspace roundtrip on each request. By enabling \texttt{FOPEN\_PASSTHROUGH}, which allows the kernel to forward I/O directly to the backing file bypassing the daemon entirely for unmodified files, passthrough mode achieves 7,236\,MB/s read throughput, a 4.4$\times$ improvement over regular FUSE and 82\% of native speed. Write throughput also improves modestly to 719\,MB/s (1.14$\times$), as writes are ultimately limited by storage I/O in both modes. These throughput numbers are sufficient for typical AI agent workloads, where the bottleneck is LLM API latency (100\,ms--10\,s per request) rather than local file I/O.
+With file descriptor caching to amortize per-request \texttt{open()}/\texttt{close()} overhead, regular FUSE mode achieves 1,655\,MB/s read throughput (19\% of native) and 631\,MB/s write throughput (comparable to native). The read gap reflects the FUSE kernel-to-userspace roundtrip on each request. By enabling \texttt{FOPEN\_PASSTHROUGH}, which bypasses the daemon for unmodified files, passthrough mode achieves 7,236\,MB/s read throughput, a 4.4$\times$ improvement over regular FUSE and 82\% of native speed. Write throughput also improves modestly to 719\,MB/s (1.14$\times$), as writes are ultimately limited by storage I/O in both modes. These throughput numbers are sufficient for typical AI agent workloads, where the bottleneck is LLM API latency (100\,ms--10\,s per request) rather than local file I/O.
 
 %% =============================================================================
 %% RELATED WORK
@@ -555,7 +555,7 @@ Speculator~\cite{speculator} pioneered speculative execution with output gating 
 \section{Discussion and Future Work}
 
 \paragraph{Network and Device Side-Effects.}
-Our current prototype isolates only filesystem state. Branch contexts can still cause irreversible external actions via network calls, IPC, or device I/O. For example, a branch that sends an HTTP request or writes to a database cannot be rolled back by aborting the branch. A complete solution requires \emph{effect gating}: buffering or journaling external side-effects until commit, and discarding them on abort. Possible approaches include interposing on the \texttt{connect()}/\texttt{sendmsg()} syscalls to redirect network traffic through a branch-aware proxy, or using \texttt{seccomp-bpf} to block external I/O entirely within branch contexts. Agent gateway architectures such as Agentry~\cite{agentry}, which mediate all agent-to-external communication through a central gateway, provide a natural interposition point for branch-aware effect gating. Speculator~\cite{speculator} demonstrated output gating for distributed file systems; extending this to general network and device I/O within our framework is an important direction for future work.
+Our current prototype isolates only filesystem state. Branch contexts can still cause irreversible external actions via network calls, IPC, or device I/O. For example, a branch that sends an HTTP request or writes to a database cannot be rolled back by aborting the branch. A complete solution requires \emph{effect gating}: buffering or journaling external side-effects until commit, and discarding them on abort. Possible approaches include interposing on the \texttt{connect()}/\texttt{sendmsg()} syscalls to redirect network traffic through a branch-aware proxy, or using \texttt{seccomp-bpf} to block external I/O entirely within branch contexts. Agent gateway architectures such as Agentry~\cite{agentry}, which mediate all agent-to-external communication through a central gateway, provide a natural interposition point for branch-aware effect gating. Speculator~\cite{speculator} demonstrated output gating for distributed file systems; extending this to general-purpose I/O is future work.
 
 \paragraph{Merge Conflicts.}
 \sys supports only single-winner semantics via epoch-based invalidation; when one branch commits, all siblings are invalidated. This is sufficient for first-commit-wins exploration but cannot combine results from multiple branches. Future work will explore three levels of merge support: (1)~\emph{file-level union}, where non-overlapping file changes from multiple branches are merged automatically; (2)~\emph{conflict detection}, where overlapping changes to the same file are flagged for the agent or orchestrator to resolve; and (3)~\emph{semantic merge}, where domain-specific merge strategies (e.g., AST-level merge for source code) enable richer combination of branch results.
