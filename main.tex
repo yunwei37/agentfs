@@ -58,7 +58,7 @@
 \email{yzhen165@ucsc.edu}
 
 \begin{abstract}
-	AI agents increasingly perform agentic exploration: pursuing multiple solution paths in parallel and committing only the successful one. Because each exploration path may modify files and spawn processes, agents require isolated environments with atomic commit and rollback semantics for both \emph{filesystem state} and \emph{process state}. We introduce the \emph{branch context}, a new OS abstraction that provides: (1)~copy-on-write state isolation with independent filesystem views and process groups, (2)~a structured lifecycle of fork, explore, and commit/abort, (3)~first-commit-wins resolution that automatically invalidates sibling branches, and (4)~nestable contexts for hierarchical exploration. We realize branch contexts in Linux through two complementary components. First, \sys is a FUSE-based filesystem that gives each branch context an isolated copy-on-write workspace, with O(1) creation, atomic commit to the parent, and automatic sibling invalidation, all without root privileges. \sys is open sourced in \url{https://github.com/multikernel/branchfs}. Second, \syscall is a proposed Linux syscall that spawns processes into branch contexts with reliable termination, kernel-enforced sibling isolation, and first-commit-wins coordination. Preliminary evaluation of \sys shows sub-350\,$\mu$s branch creation independent of base filesystem size, and modification-proportional commit overhead (under 1\,ms for small changes).
+	AI agents increasingly perform agentic exploration: pursuing multiple solution paths in parallel and committing only the successful one. Because each exploration path may modify files and spawn processes, agents require isolated environments with atomic commit and rollback semantics for both \emph{filesystem state} and \emph{process state}. We introduce the \emph{branch context}, a new OS abstraction that provides: (1)~copy-on-write state isolation with independent filesystem views and process groups, (2)~a structured lifecycle of fork, explore, and commit/abort, (3)~first-commit-wins resolution that automatically invalidates sibling branches, and (4)~nestable contexts for hierarchical exploration. We realize branch contexts in Linux through two complementary components. First, \sys is a FUSE-based filesystem that gives each branch context an isolated copy-on-write workspace, with O(1) creation, atomic commit to the parent, and automatic sibling invalidation, all without root privileges. \sys is open sourced in \url{https://github.com/multikernel/branchfs}, along with a Python integration library, \textsc{BranchContext}~\cite{branchcontext}, that provides ready-to-use agent exploration patterns. Second, \syscall is a proposed Linux syscall that spawns processes into branch contexts with reliable termination, kernel-enforced sibling isolation, and first-commit-wins coordination. Preliminary evaluation of \sys shows sub-350\,$\mu$s branch creation independent of base filesystem size, and modification-proportional commit overhead (under 1\,ms for small changes).
 \end{abstract}
 
 \keywords{Agentic exploration, AI agents, Filesystem branching, Copy-on-write, FUSE, Operating system primitives}
@@ -128,7 +128,7 @@ Agents spawn processes (compilers, test runners, package managers) within each p
 No existing OS mechanism satisfies these requirements (Tables~\ref{tab:comparison} and~\ref{tab:process-comparison}).
 
 \paragraph{Filesystem branching.}
-OverlayFS~\cite{overlayfs} supports stacked overlays since Linux~5.0, but each layer has a single writable upper directory with no native commit-to-parent or sibling invalidation, and mounting requires root privileges. Btrfs~\cite{btrfs} and ZFS~\cite{zfs} support nested subvolumes and clones but are each tied to a single filesystem type and lack native commit-to-parent. Device-mapper snapshots~\cite{dmsnapshot} require raw block devices with O(depth) read latency. DAXFS~\cite{daxfs} provides branching with commit and sibling invalidation but targets memory-backed storage and is not portable.
+Union filesystems such as UnionFS~\cite{unionfs} and its successor OverlayFS~\cite{overlayfs} provide a single writable upper directory with no native commit-to-parent or sibling invalidation, and mounting requires root privileges. Btrfs~\cite{btrfs} and ZFS~\cite{zfs} support nested subvolumes and clones but are each tied to a single filesystem type and lack native commit-to-parent. Device-mapper snapshots~\cite{dmsnapshot} require raw block devices with O(depth) read latency.
 
 At coarser granularity, VM snapshot systems~\cite{qcow2,vmware-snapshots,remus,snowflock} have whole-VM overhead; recent serverless snapshot work~\cite{firecracker,faasnap,catalyzer} reduces startup latency but does not address branching semantics; and CRIU~\cite{criu} requires full state serialization, all violating R5.
 
@@ -140,20 +140,18 @@ Process groups and sessions~\cite{apue} allow group termination, but processes c
 	\caption{Feature comparison of filesystem branching mechanisms.}
 	\label{tab:comparison}
 	\resizebox{\columnwidth}{!}{%
-		\begin{tabular}{lccccc}
+		\begin{tabular}{lcccc}
 			\toprule
-			Feature              & OverlayFS & Btrfs/ZFS & DM-Snap & DAXFS  & \sys   \\
+			Feature              & OverlayFS/UnionFS & Btrfs/ZFS & DM-Snap & \sys   \\
 			\midrule
-			Portable across FSes & \cmark    & \xmark & \cmark  & \xmark & \cmark \\
-			Nested branches      & \xmark$^{*}$ & \cmark & \xmark  & \cmark & \cmark \\
-			Commit-to-parent     & \xmark    & \xmark & \xmark  & \cmark & \cmark \\
-			Sibling invalidation & \xmark    & \xmark & \xmark  & \cmark & \cmark \\
-			No root privileges   & \xmark    & \xmark & \xmark  & \xmark & \cmark \\
+			Portable across FSes & \cmark    & \xmark & \cmark  & \cmark \\
+			Nested branches      & \xmark    & \cmark & \xmark  & \cmark \\
+			Commit-to-parent     & \xmark    & \xmark & \xmark  & \cmark \\
+			Sibling invalidation & \xmark    & \xmark & \xmark  & \cmark \\
+			No root privileges   & \xmark    & \xmark & \xmark  & \cmark \\
 			\bottomrule
 		\end{tabular}}
 
-	\smallskip
-	{\scriptsize $^{*}$Stacked overlays supported since Linux~5.0, but without commit semantics.}
 \end{table}
 
 \begin{table}[t]
@@ -346,6 +344,11 @@ An abort discards the branch's delta layer without modifying the parent, incurri
 
 When used with \syscall (Section~\ref{sec:branch-syscall}), branch management is instead driven by the kernel: \syscall issues \texttt{FS\_IOC\_BRANCH\_*} ioctls to create, commit, and abort branches, and handles mount namespace setup atomically.
 
+\subsection{Agent Integration Library}
+\label{sec:agent-integration}
+
+To bridge \sys with agent frameworks, we provide \textsc{BranchContext}~\cite{branchcontext}, a Python library that wraps \sys's branching primitives into high-level exploration patterns. At its core, a \texttt{Workspace} context manager mounts \sys and exposes \texttt{Branch} objects with automatic commit-on-success and abort-on-failure semantics. On top of this, the library provides seven composable patterns that directly realize the agent strategies described in Section~\ref{sec:motivation}: \emph{Speculate} races $N$ candidates and commits the first success; \emph{BestOfN} runs $N$ candidates and commits the highest-scoring one; \emph{Reflexion} retries sequentially, feeding failure feedback into the next attempt; \emph{TreeOfThoughts} explores hierarchical strategy trees with nested branches; \emph{BeamSearch} keeps the top-$K$ branches alive at each depth level; \emph{Tournament} performs pairwise elimination via a judge function; and \emph{Cascaded} starts with one attempt and adaptively fans out on failure. Each pattern manages branch lifecycle (creation, commit, abort) and process isolation (via \texttt{fork(2)} with optional timeout and resource limits) internally, so agent code only supplies the per-branch task logic.
+
 %% =============================================================================
 %% SYS_BRANCH DESIGN
 %% =============================================================================
@@ -476,7 +479,7 @@ While branches exist, the parent becomes read-only for both filesystem (\sys den
 
 \subsection{Filesystem-Agnostic Integration}
 
-\syscall integrates with branching filesystems entirely through three generic ioctls (\texttt{FS\_IOC\_BRANCH\_CREATE}, \texttt{\_COMMIT}, \texttt{\_ABORT}), following the pattern of existing generic ioctls such as \texttt{FICLONE} and \texttt{FIEMAP}. For FUSE-based filesystems like \sys, ioctls are forwarded to the daemon via \texttt{FUSE\_IOCTL}; for kernel-native filesystems like DAXFS~\cite{daxfs}, they are handled directly. Crucially, \syscall itself contains no filesystem-specific code: adding a new branching filesystem requires only implementing the three ioctls, with no changes to \syscall or the VFS layer.
+\syscall integrates with branching filesystems entirely through three generic ioctls (\texttt{FS\_IOC\_BRANCH\_CREATE}, \texttt{\_COMMIT}, \texttt{\_ABORT}), following the pattern of existing generic ioctls such as \texttt{FICLONE} and \texttt{FIEMAP}. For FUSE-based filesystems like \sys, ioctls are forwarded to the daemon via \texttt{FUSE\_IOCTL}; for kernel-native filesystems, they are handled directly. Crucially, \syscall itself contains no filesystem-specific code: adding a new branching filesystem requires only implementing the three ioctls, with no changes to \syscall or the VFS layer.
 
 %% =============================================================================
 %% EVALUATION
@@ -567,7 +570,7 @@ Our current prototype isolates only filesystem state. External side effects (net
 \paragraph{Implementation Roadmap.}
 \syscall is currently a design proposal. We plan to prototype it on Linux 6.19, initially supporting \texttt{BR\_FS} and \texttt{BR\_ISOLATE}, with memory branching (\texttt{BR\_MEMORY}) as a follow-on effort due to the page table complexity involved. On the filesystem side, \sys's file-level copy-on-write has known limitations: symlinks targeting absolute paths outside the branch resolve to unbranched files, hardlinks lose their link relationship on copy-on-write, special files (FIFOs, sockets, device nodes) are unsupported in delta layer, and disk space exhaustion causes \texttt{-ENOSPC} errors. These suffice for agent workloads but need addressing for general use.
 
-Current agents (Claude Code, SWE-agent, OpenHands) primarily checkpoint via files rather than process memory, suggesting that \texttt{BR\_FS}-only mode covers most current use cases. The \texttt{BR\_MEMORY} flag provides future capability for agents with significant in-memory state (e.g., persistent Python interpreters or embedding caches). Integration requires minimal changes: the orchestrator creates branches and commits the winner, while agents run unmodified inside their branch's mount namespace.
+Current agents (Claude Code, SWE-agent, OpenHands) primarily checkpoint via files rather than process memory, suggesting that \texttt{BR\_FS}-only mode covers most current use cases. The \texttt{BR\_MEMORY} flag provides future capability for agents with significant in-memory state (e.g., persistent Python interpreters or embedding caches). The \textsc{BranchContext} library (Section~\ref{sec:agent-integration}) already provides this integration for Python-based agents, wrapping \sys into ready-to-use exploration patterns so that agent code only supplies per-branch task logic. Agents run unmodified inside their branch's mount namespace; the library manages branch lifecycle and process isolation.
 
 Although we focus on AI agents, the fork/explore/commit abstraction generalizes: with \texttt{n\_branches=1} it provides single-branch try-and-rollback useful for package management (try an upgrade, abort if it breaks) and system configuration tuning.
 
@@ -576,7 +579,7 @@ Although we focus on AI agents, the fork/explore/commit abstraction generalizes:
 %% =============================================================================
 \section{Conclusion}
 
-Agentic exploration requires isolating both filesystem and process state across parallel execution paths, with atomic commit and rollback semantics. We introduce the \emph{branch context} abstraction to capture these requirements and present two complementary implementations in Linux. \sys is a FUSE-based filesystem that provides lightweight copy-on-write branching with O(1) creation and atomic commit-to-parent, all without root privileges. \syscall is a proposed Linux syscall for kernel-enforced process coordination with reliable termination and first-commit-wins semantics, integrating with branching filesystems through generic \texttt{FS\_IOC\_BRANCH\_*} ioctls that keep the syscall filesystem-agnostic. Preliminary evaluation shows O(1) branch creation and modification-proportional commit costs.
+Agentic exploration requires isolating both filesystem and process state across parallel execution paths, with atomic commit and rollback semantics. We introduce the \emph{branch context} abstraction to capture these requirements and present two complementary implementations in Linux. \sys is a FUSE-based filesystem that provides lightweight copy-on-write branching with O(1) creation and atomic commit-to-parent, all without root privileges. On top of \sys, the \textsc{BranchContext} Python library provides seven composable exploration patterns (parallel speculation, best-of-N, reflexion, tree-of-thoughts, and others) for direct integration with agent frameworks. \syscall is a proposed Linux syscall for kernel-enforced process coordination with reliable termination and first-commit-wins semantics, integrating with branching filesystems through generic \texttt{FS\_IOC\_BRANCH\_*} ioctls that keep the syscall filesystem-agnostic. Preliminary evaluation shows O(1) branch creation and modification-proportional commit costs.
 
 \bibliographystyle{ACM-Reference-Format}
 \bibliography{references}
