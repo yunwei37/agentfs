@@ -325,37 +325,14 @@ Fourth, nestability: a branch context can itself fork sub-contexts, forming an e
 
 # Architecture Overview
 
+## Two-component design: BranchFS + branch() syscall
+
 <div class="flex justify-center">
-
-```
-      ┌────────────────┐
-      │ Parent Process │
-      └───────┬────────┘
-              │ branch(N=3)
-      ┌───────┼───────┐
-      ▼       ▼       ▼
-  ┌──────┐┌──────┐┌──────┐
-  │ Ch 1 ││ Ch 2 ││ Ch 3 │  ← Process isolation
-  └──┬───┘└──┬───┘└──┬───┘
-  ┌──▼──┐┌──▼──┐┌──▼──┐
-  │Mt NS││Mt NS││Mt NS│     ← Mount namespace
-  └──┬──┘└──┬──┘└──┬──┘
-  ═══╪══════╪══════╪═══
-  │  BranchFS (FUSE)   │    ← Filesystem branching
-  ═══╪══════╪══════╪═══
-  ┌──▼──┐┌──▼──┐┌──▼──┐
-  │ Δ₁  ││ Δ₂  ││ Δ₃  │    ← Per-branch deltas (CoW)
-  └──┬──┘└──┬──┘└──┬──┘
-     └──────┼──────┘
-    ┌───────▼────────┐
-    │ Base Directory  │      ← Original files
-    └────────────────┘
-```
-
+  <img src="/fig-architecture.png" class="rounded shadow-lg" style="max-height: 380px;" alt="Architecture overview" />
 </div>
 
-<div class="text-xs text-center opacity-80">
-Two components: <strong>BranchFS</strong> (FUSE for CoW isolation) + <strong>branch() syscall</strong> (kernel process coordination)
+<div class="text-xs text-center mt-1 opacity-80">
+<strong>branch()</strong> coordinates process creation and mount namespace isolation; <strong>BranchFS</strong> provides filesystem branching with copy-on-write semantics.
 </div>
 
 <!--
