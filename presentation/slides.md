@@ -53,7 +53,7 @@ We'll show why AI agents need new OS primitives for parallel exploration, and pr
 - Need to **isolate** each path, **commit** the winner, **discard** the rest
 
 <div class="mt-3 p-2 rounded border-2 border-dashed border-red-400 text-sm">
-<strong>Example:</strong> An agent tries 3 bug fixes simultaneously — only the one passing tests should be committed.
+<strong>Example:</strong> An agent tries 3 bug fixes simultaneously, only the one passing tests should be committed.
 </div>
 
 </div>
@@ -78,7 +78,7 @@ We'll show why AI agents need new OS primitives for parallel exploration, and pr
 </div>
 
 <!--
-Modern AI agents take real actions — shell commands, file edits, package installs — producing irreversible side effects. And increasingly, they explore multiple solution paths in parallel.
+Modern AI agents take real actions, shell commands, file edits, package installs, producing irreversible side effects. And increasingly, they explore multiple solution paths in parallel.
 
 The core challenge: each path modifies filesystem state and spawns processes. We need to isolate each path, commit the winner, and discard the rest.
 
@@ -109,17 +109,17 @@ No existing OS mechanism satisfies all six requirements.
 <!--
 We distill six requirements for agentic exploration.
 
-R1: Isolated parallel execution — because concurrent paths may modify the same files.
+R1: Isolated parallel execution, because concurrent paths may modify the same files.
 
-R2: Atomic commit with single-winner resolution — the winning path's changes must be applied atomically, and all siblings invalidated.
+R2: Atomic commit with single-winner resolution, the winning path's changes must be applied atomically, and all siblings invalidated.
 
-R3: Hierarchical nesting — Tree-of-Thoughts and similar patterns explore hierarchically, so branches must be nestable.
+R3: Hierarchical nesting, Tree-of-Thoughts and similar patterns explore hierarchically, so branches must be nestable.
 
-R4: Complete filesystem coverage — not just tracked source files, but ALL modifications including build artifacts and installed packages.
+R4: Complete filesystem coverage, not just tracked source files, but ALL modifications including build artifacts and installed packages.
 
-R5: Lightweight, unprivileged, and portable — branch creation must be sub-millisecond, require no root, and work on any filesystem.
+R5: Lightweight, unprivileged, and portable, branch creation must be sub-millisecond, require no root, and work on any filesystem.
 
-R6: Process coordination — reliable termination of all processes in a branch, with sibling isolation.
+R6: Process coordination, reliable termination of all processes in a branch, with sibling isolation.
 
 As we'll show next, no existing OS mechanism satisfies all six.
 -->
@@ -171,7 +171,7 @@ As we'll show next, no existing OS mechanism satisfies all six.
 <!--
 Let's look at the gap. For filesystem branching: OverlayFS lacks commit semantics and requires root. Btrfs and ZFS are filesystem-specific. Device-mapper has O(depth) latency. Only BranchFS checks all boxes.
 
-For process management: process groups are escapable. Cgroups need setup and root. PID namespaces have PID 1 overhead. And composing these in userspace creates race windows between steps — a process can fork between cgroup creation and migration.
+For process management: process groups are escapable. Cgroups need setup and root. PID namespaces have PID 1 overhead. And composing these in userspace creates race windows between steps: a process can fork between cgroup creation and migration.
 
 Our proposed BranchFS and branch() syscall are the only solutions that satisfy all requirements.
 -->
@@ -195,10 +195,10 @@ Fork ──► Explore ──► Commit (winner)
 
 **Four Core Properties:**
 
-1. **Frozen origin** — parent read-only; no merge conflicts
-2. **Parallel isolated execution** — N contexts, fully isolated
-3. **First-commit-wins** — siblings auto-invalidated
-4. **Nestable** — sub-contexts form exploration tree
+1. **Frozen origin**: parent read-only; no merge conflicts
+2. **Parallel isolated execution**: N contexts, fully isolated
+3. **First-commit-wins**: siblings auto-invalidated
+4. **Nestable**: sub-contexts form exploration tree
 
 </div>
 
@@ -217,7 +217,7 @@ Fork ──► Explore ──► Commit (winner)
 </div>
 
 <!--
-Our solution is the branch context — a new OS abstraction. It encapsulates a copy-on-write filesystem view plus a confined process group. The lifecycle is Fork, Explore, then Commit or Abort.
+Our solution is the branch context, a new OS abstraction. It encapsulates a copy-on-write filesystem view plus a confined process group. The lifecycle is Fork, Explore, then Commit or Abort.
 
 Four properties define the semantics: frozen origin eliminates merge conflicts; parallel isolated execution enables speedup; first-commit-wins provides automatic resolution; and nestability supports hierarchical exploration.
 
@@ -253,19 +253,19 @@ The architecture has two components. The branch() syscall coordinates process cr
 
 <div class="border-l-4 border-blue-500 pl-3 mb-2">
 
-**O(1) branch creation** — just create a delta directory
+**O(1) branch creation**: just create a delta directory
 
 </div>
 
 <div class="border-l-4 border-green-500 pl-3 mb-2">
 
-**No root privileges** — runs entirely as a FUSE daemon
+**No root privileges**: runs entirely as a FUSE daemon
 
 </div>
 
 <div class="border-l-4 border-orange-500 pl-3 mb-2">
 
-**Portable** — works on ext4, XFS, NFS, any FS
+**Portable**: works on ext4, XFS, NFS, any FS
 
 </div>
 
@@ -282,11 +282,79 @@ The architecture has two components. The branch() syscall coordinates process cr
 <!--
 BranchFS is implemented in about 3,400 lines of Rust using FUSE.
 
-It uses file-level copy-on-write. The first time a file is modified on a branch, the entire file is copied to the branch's delta layer. After that, all reads and writes go to the delta copy. Unmodified files are resolved by walking the branch chain — first checking the current branch, then ancestors, then the base directory. Tombstone markers handle deletions so deleted files don't reappear from the base.
+It uses file-level copy-on-write. The first time a file is modified on a branch, the entire file is copied to the branch's delta layer. After that, all reads and writes go to the delta copy. Unmodified files are resolved by walking the branch chain: first checking the current branch, then ancestors, then the base directory. Tombstone markers handle deletions so deleted files don't reappear from the base.
 
-Three key design properties. First, O(1) branch creation — we just create a new delta directory. Second, no root privileges — it runs entirely as a userspace FUSE daemon. Third, portable — works on ext4, XFS, NFS, anything.
+Three key design properties. First, O(1) branch creation: we just create a new delta directory. Second, no root privileges, it runs entirely as a userspace FUSE daemon. Third, portable, works on ext4, XFS, NFS, anything.
 
 For commit, we copy the delta to the parent and increment an epoch counter, which invalidates all siblings. Abort just discards the delta layer at near-zero cost. Importantly, the cost is proportional to modification size, not total filesystem size.
+-->
+
+---
+
+# The branch() Syscall
+
+<div class="grid grid-cols-2 gap-5 text-sm mt-1">
+
+<div>
+
+### Why a Kernel Primitive?
+
+Setting up cgroups + PID ns + mount ns + FS branches in **userspace**:
+
+- **Multi-step** with race windows between steps
+- A process can fork between cgroup creation and migration
+- **Error-prone** cleanup on partial failure
+
+<div class="mt-2 p-2 bg-blue-50 rounded border border-blue-300 text-xs">
+<code>branch()</code> composes all atomically in a <strong>single call</strong> with kernel-side cleanup on failure.
+</div>
+
+### Three Operations
+
+- `BR_CREATE`: fork N children, each in its own branch
+- `BR_COMMIT`: apply FS changes, terminate siblings
+- `BR_ABORT`: discard changes, terminate self
+
+</div>
+
+<div>
+
+### Interface
+
+```c
+long branch(int op,
+            union branch_attr *attr,
+            size_t size);
+```
+
+### Composable Flags
+
+| Flag | Effect |
+|------|--------|
+| `BR_FS` | Mount namespace + FS branch |
+| `BR_MEMORY` | Page-table CoW |
+| `BR_ISOLATE` | Signal/ptrace barriers |
+| `BR_CLOSE_FDS` | Close inherited FDs |
+
+- FS-agnostic: generic `FS_IOC_BRANCH_*` ioctls
+- Adding a new branching FS = implement 3 ioctls
+
+</div>
+
+</div>
+
+<!--
+Now let me explain why we need a kernel primitive.
+
+Setting up cgroups, PID namespaces, mount namespaces, and filesystem branches in userspace is a multi-step process with race windows. A process can fork between cgroup creation and migration. Error handling for partial failures is fragile and error-prone.
+
+The branch() syscall composes all of this atomically in a single call, with kernel-side cleanup on failure. This follows the same rationale that motivated clone() over manual fork() plus unshare().
+
+The interface is simple: three operations. BR_CREATE forks N children, each in its own branch. BR_COMMIT applies filesystem changes and terminates siblings. BR_ABORT discards changes and terminates the branch.
+
+Four composable flags control the scope: BR_FS for mount namespace and filesystem branching, BR_MEMORY for page-table copy-on-write, BR_ISOLATE for signal and ptrace barriers, and BR_CLOSE_FDS to close inherited file descriptors.
+
+Importantly, the syscall is filesystem-agnostic. It communicates with branching filesystems through three generic ioctls. Adding a new branching filesystem just means implementing these three ioctls, no changes to the syscall or VFS layer.
 -->
 
 ---
@@ -339,81 +407,13 @@ results = ctx.best_of_n(
 </div>
 
 <!--
-To make this practical for agent developers, we provide BranchContext — a Python library with seven ready-to-use exploration patterns.
+To make this practical for agent developers, we provide BranchContext, a Python library with seven ready-to-use exploration patterns.
 
 Speculate races N candidates and commits the first success. BestOfN runs all N and commits the highest-scoring. Reflexion does sequential retry with failure feedback. TreeOfThoughts supports hierarchical exploration with nested branches. BeamSearch keeps the top-K branches alive at each depth. Tournament does pairwise elimination. And Cascaded starts with one branch and adaptively fans out on failure.
 
-Here's a simple example: best-of-N. You create a BranchContext, call best_of_n with three branches, provide a task function and a scoring function. The library handles all the branching, isolation, and cleanup — the winner is automatically committed.
+Here's a simple example: best-of-N. You create a BranchContext, call best_of_n with three branches, provide a task function and a scoring function. The library handles all the branching, isolation, and cleanup, the winner is automatically committed.
 
 The key point is: agent developers just provide per-branch task logic. The library manages the entire branch lifecycle and process isolation internally.
--->
-
----
-
-# The branch() Syscall
-
-<div class="grid grid-cols-2 gap-5 text-sm mt-1">
-
-<div>
-
-### Why a Kernel Primitive?
-
-Setting up cgroups + PID ns + mount ns + FS branches in **userspace**:
-
-- **Multi-step** with race windows between steps
-- A process can fork between cgroup creation and migration
-- **Error-prone** cleanup on partial failure
-
-<div class="mt-2 p-2 bg-blue-50 rounded border border-blue-300 text-xs">
-<code>branch()</code> composes all atomically in a <strong>single call</strong> with kernel-side cleanup on failure.
-</div>
-
-### Three Operations
-
-- `BR_CREATE` — fork N children, each in its own branch
-- `BR_COMMIT` — apply FS changes, terminate siblings
-- `BR_ABORT` — discard changes, terminate self
-
-</div>
-
-<div>
-
-### Interface
-
-```c
-long branch(int op,
-            union branch_attr *attr,
-            size_t size);
-```
-
-### Composable Flags
-
-| Flag | Effect |
-|------|--------|
-| `BR_FS` | Mount namespace + FS branch |
-| `BR_MEMORY` | Page-table CoW |
-| `BR_ISOLATE` | Signal/ptrace barriers |
-| `BR_CLOSE_FDS` | Close inherited FDs |
-
-- FS-agnostic: generic `FS_IOC_BRANCH_*` ioctls
-- Adding a new branching FS = implement 3 ioctls
-
-</div>
-
-</div>
-
-<!--
-Now let me explain why we need a kernel primitive.
-
-Setting up cgroups, PID namespaces, mount namespaces, and filesystem branches in userspace is a multi-step process with race windows. A process can fork between cgroup creation and migration. Error handling for partial failures is fragile and error-prone.
-
-The branch() syscall composes all of this atomically in a single call, with kernel-side cleanup on failure. This follows the same rationale that motivated clone() over manual fork() plus unshare().
-
-The interface is simple: three operations. BR_CREATE forks N children, each in its own branch. BR_COMMIT applies filesystem changes and terminates siblings. BR_ABORT discards changes and terminates the branch.
-
-Four composable flags control the scope: BR_FS for mount namespace and filesystem branching, BR_MEMORY for page-table copy-on-write, BR_ISOLATE for signal and ptrace barriers, and BR_CLOSE_FDS to close inherited file descriptors.
-
-Importantly, the syscall is filesystem-agnostic. It communicates with branching filesystems through three generic ioctls. Adding a new branching filesystem just means implementing these three ioctls — no changes to the syscall or VFS layer.
 -->
 
 ---
@@ -424,7 +424,7 @@ Importantly, the syscall is filesystem-agnostic. It communicates with branching 
 
 <div class="border-2 border-blue-400 rounded-lg p-3">
 
-<div class="font-semibold text-blue-600 mb-1 text-sm">Branch Creation — O(1)</div>
+<div class="font-semibold text-blue-600 mb-1 text-sm">Branch Creation: O(1)</div>
 
 | Base Size | Latency |
 |:-:|:-:|
@@ -467,7 +467,7 @@ Proportional to mod size.
 </div>
 
 <div class="mt-2 text-sm text-center">
-Agent workloads dominated by <strong>LLM API latency</strong> (100 ms – 10 s) — BranchFS I/O overhead is <strong>negligible</strong>.
+Agent workloads dominated by <strong>LLM API latency</strong> (100 ms – 10 s), BranchFS I/O overhead is <strong>negligible</strong>.
 </div>
 
 <div class="mt-1 text-xs text-center opacity-60">
@@ -475,11 +475,11 @@ Hardware: AMD Ryzen 5 5500U, 8 GB DDR4, NVMe SSD. Median of 10 trials. BranchFS:
 </div>
 
 <!--
-For evaluation, branch creation is O(1) — under 350 microseconds regardless of base size, because it just allocates a delta directory.
+For evaluation, branch creation is O(1): under 350 microseconds regardless of base size, because it just allocates a delta directory.
 
 Commit cost is proportional to modification size: under 1 millisecond for small changes, about 2 milliseconds for 1 megabyte. Abort is even faster.
 
-For I/O throughput, with FUSE passthrough mode we achieve 7.2 gigabytes per second read — 82% of native. Write actually exceeds native because we treat fsync as a no-op for ephemeral branches.
+For I/O throughput, with FUSE passthrough mode we achieve 7.2 gigabytes per second read, 82% of native. Write actually exceeds native because we treat fsync as a no-op for ephemeral branches.
 
 Most importantly, agent workloads are dominated by LLM API latency of 100ms to 10 seconds, so BranchFS overhead is negligible in practice.
 -->
@@ -495,14 +495,14 @@ Most importantly, agent workloads are dominated by LLM API latency of 100ms to 1
 ### Related Work
 
 - **Containers/gVisor/Dune**: general containment, not branching
-- **Speculator**: sequential speculation for distributed FS — we do parallel N-way with first-commit-wins
-- **TxOS**: flat, short-lived OS transactions — we're nestable, long-lived, userspace FUSE
+- **Speculator**: sequential speculation for distributed FS, we do parallel N-way with first-commit-wins
+- **TxOS**: flat, short-lived OS transactions, we're nestable, long-lived, userspace FUSE
 - **lwCs/Capsicum**: different isolation granularity
 
 ### Current Limitations
 
 - **External side effects** (network, IPC) not rolled back
-- **Single-winner** only — no multi-branch merge
+- **Single-winner** only, no multi-branch merge
 - File-level CoW: symlinks, hardlinks unsupported
 - **BR_MEMORY** not yet implemented
 
@@ -514,25 +514,25 @@ Most importantly, agent workloads are dominated by LLM API latency of 100ms to 1
 
 <div class="border-l-4 border-blue-500 pl-3 mb-2">
 
-**Effect gating** — buffer network/IPC until commit; agent gateways provide interposition points
+**Effect gating**: buffer network/IPC until commit; agent gateways provide interposition points
 
 </div>
 
 <div class="border-l-4 border-green-500 pl-3 mb-2">
 
-**Multi-branch merge** — union non-overlapping changes; conflict detection
+**Multi-branch merge**: union non-overlapping changes; conflict detection
 
 </div>
 
 <div class="border-l-4 border-purple-500 pl-3 mb-2">
 
-**Roadmap** — prototype `branch()` on Linux 6.19; BR_FS + BR_ISOLATE first
+**Roadmap**: prototype `branch()` on Linux 6.19; BR_FS + BR_ISOLATE first
 
 </div>
 
 <div class="border-l-4 border-orange-500 pl-3">
 
-**Broader use** — `n_branches=1` → try-and-rollback for package mgmt, system tuning
+**Broader use**: `n_branches=1` → try-and-rollback for package mgmt, system tuning
 
 </div>
 
@@ -543,7 +543,7 @@ Most importantly, agent workloads are dominated by LLM API latency of 100ms to 1
 <!--
 Let me position this against related work and discuss future directions.
 
-Containers and VMs provide general containment but not branching. Speculator pioneered OS speculation but is sequential and owner-decided — we do parallel N-way with competitive first-commit-wins. TxOS has flat, short-lived transactions requiring deep kernel mods — ours are nestable and run in userspace.
+Containers and VMs provide general containment but not branching. Speculator pioneered OS speculation but is sequential and owner-decided, we do parallel N-way with competitive first-commit-wins. TxOS has flat, short-lived transactions requiring deep kernel mods, ours are nestable and run in userspace.
 
 For limitations: we currently only isolate filesystem state, not network or IPC. We support single-winner only. The branch() syscall is still a design proposal.
 
@@ -587,13 +587,13 @@ First, agentic exploration is a first-class OS concern. AI agents need isolated,
 
 Second, the branch context is a new OS abstraction with a fork-explore-commit lifecycle and first-commit-wins resolution.
 
-Third, BranchFS is a working FUSE implementation — you can use it today. It provides O(1) creation, requires no root privileges, and is portable across filesystems.
+Third, BranchFS is a working FUSE implementation, you can use it today. It provides O(1) creation, requires no root privileges, and is portable across filesystems.
 
 Fourth, BranchContext is a Python library providing seven ready-to-use exploration patterns that wrap BranchFS into a high-level API.
 
 Fifth, the branch() syscall is our proposed kernel primitive for atomic composition of process and filesystem coordination.
 
-Both BranchFS and BranchContext are open source — please check them out on GitHub.
+Both BranchFS and BranchContext are open source, please check them out on GitHub.
 -->
 
 ---
@@ -601,13 +601,13 @@ layout: center
 class: text-center
 ---
 
-# Thank You — Questions?
+# Thank You – Questions?
 
 <div class="mt-6 text-lg">
 
-**Cong Wang** — cwang@multikernel.io
+**Cong Wang** – cwang@multikernel.io
 
-**Yusheng Zheng** — yzhen165@ucsc.edu
+**Yusheng Zheng** – yzhen165@ucsc.edu
 
 </div>
 
