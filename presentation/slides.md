@@ -42,85 +42,47 @@ We'll show why AI agents need new OS primitives for parallel exploration, and pr
 
 ---
 
-# The Problem: Agents Have Side Effects
+# Problem: Agents Explore, But Have Side Effects
 
-<div class="grid grid-cols-2 gap-6 text-base mt-2">
+<div class="grid grid-cols-2 gap-5 text-sm mt-1">
 
-<div class="border-l-4 border-blue-500 pl-4">
+<div>
 
-### Agentic Exploration
-
-- AI agents (SWE-Agent, OpenHands, Claude Code) execute **multi-step tasks**
-- Shell commands, file edits, package installs → **irreversible side effects**
-- Increasingly exploring **multiple paths in parallel**:
-  Tree-of-Thoughts, Reflexion, Best-of-N
-
-</div>
-
-<div class="border-l-4 border-orange-500 pl-4">
-
-### The Core Challenge
-
-- Each path modifies **filesystem state** (workspace files)
-- Each path spawns **processes** (compilers, test runners)
+- AI agents (SWE-Agent, OpenHands, Claude Code) run shell commands, edit files, install packages → **irreversible side effects**
+- Increasingly exploring **multiple paths in parallel**: Tree-of-Thoughts, Reflexion, Best-of-N
 - Need to **isolate** each path, **commit** the winner, **discard** the rest
 
+<div class="mt-3 p-2 rounded border-2 border-dashed border-red-400 text-sm">
+<strong>Example:</strong> An agent tries 3 bug fixes simultaneously — only the one passing tests should be committed.
 </div>
 
 </div>
 
-<div class="mt-4 p-3 rounded border-2 border-dashed border-red-400 text-base text-center">
-<strong>Example:</strong> A software engineering agent tries 3 candidate fixes simultaneously.<br/>Only the one that passes tests should be committed — the rest must be cleanly discarded.
-</div>
+<div>
 
-<!--
-Modern AI agents don't just chat — they take real actions. Software engineering agents like SWE-Agent and OpenHands run shell commands, edit files, install packages. Each of these actions produces irreversible side effects on the filesystem.
-
-And increasingly, agent systems explore multiple solution paths in parallel — using strategies like Tree-of-Thoughts, Reflexion, or Best-of-N sampling.
-
-The core challenge is: each exploration path modifies filesystem state and spawns processes. We need a way to isolate each path, commit the successful one, and cleanly discard the rest.
-
-For example, imagine a software engineering agent trying three different bug fixes simultaneously. Only the one that passes all tests should be committed. The other two must be discarded without leaving any trace.
--->
-
----
-
-# What Do Agents Use Today?
-
-<div class="text-base mt-2">
+### What Do Agents Use Today?
 
 | Approach | Limitation |
 |----------|-----------|
-| **Git stashing** | Cannot capture non-tracked files (build artifacts, node_modules) |
-| **Temporary directories** | Manual setup/teardown, no atomic commit |
-| **Container clones** | Heavyweight, requires root, slow startup |
-| **Per-file snapshots** | Miss shell command side effects, no parallel branching |
+| Git stashing | Misses untracked files |
+| Temp directories | No atomic commit |
+| Containers | Heavyweight, needs root |
+| Per-file snapshots | Misses shell side effects |
 
+<div class="mt-2 p-2 bg-red-50 rounded border border-red-300 text-xs">
+<strong>None</strong> captures all FS modifications with atomic commit/rollback. No parallel branching, no sibling invalidation.
 </div>
 
-<div class="mt-4 p-3 bg-red-50 rounded border border-red-300 text-base text-center">
-<strong>None</strong> captures all filesystem modifications with atomic commit/rollback.
 </div>
-
-<div class="mt-3 text-sm opacity-80">
-
-- **LangChain & AutoGPT**: rely on git stashing or temporary directories
-- **Claude Code**: per-file snapshots that cannot capture `npm install` side effects
 
 </div>
 
 <!--
-So what do agents use today? Let me walk through the options.
+Modern AI agents take real actions — shell commands, file edits, package installs — producing irreversible side effects. And increasingly, they explore multiple solution paths in parallel.
 
-Git stashing is popular, but it only captures tracked files. Build artifacts, node_modules, dotfiles — all missed.
+The core challenge: each path modifies filesystem state and spawns processes. We need to isolate each path, commit the winner, and discard the rest.
 
-Temporary directories require manual setup and teardown, with no atomic commit semantics.
-
-Container clones are heavyweight — they require root privileges and have slow startup times.
-
-Per-file snapshots, like what Claude Code uses, miss side effects from shell commands like npm install, and don't support parallel branching.
-
-The bottom line: none of these approaches captures all filesystem modifications with atomic commit and rollback semantics. This is the gap we're addressing.
+What do agents use today? Git stashing misses untracked files. Temp directories have no atomic commit. Containers are heavyweight. Per-file snapshots miss shell side effects. None captures all filesystem modifications with atomic commit and rollback.
 -->
 
 ---
@@ -164,139 +126,90 @@ As we'll show next, no existing OS mechanism satisfies all six.
 
 ---
 
-# Gap: Existing Filesystem Mechanisms
+# Why Existing Mechanisms Fall Short
 
-<div class="text-base mt-2">
+<div class="grid grid-cols-2 gap-4 text-xs mt-1">
 
-| Feature | OverlayFS | Btrfs/ZFS | DM-Snap | DAXFS | **BranchFS** |
-|---------|:---------:|:---------:|:-------:|:-----:|:------------:|
-| Portable across filesystems | ✓ | ✗ | ✓ | ✗ | **✓** |
-| Nested branches | ✗* | ✓ | ✗ | ✓ | **✓** |
-| Commit-to-parent | ✗ | ✗ | ✗ | ✓ | **✓** |
-| Sibling invalidation | ✗ | ✗ | ✗ | ✓ | **✓** |
-| No root privileges | ✗ | ✗ | ✗ | ✗ | **✓** |
+<div>
 
-</div>
+### Filesystem Branching
 
-<div class="mt-3 text-sm">
-
-- **OverlayFS**: stacked overlays since Linux 5.0, but no commit semantics, requires root
-- **Btrfs/ZFS**: nested subvolumes, but filesystem-specific, no commit-to-parent
-- **Device-mapper snapshots**: require raw block devices, O(depth) read latency
-- **DAXFS**: branching with commit, but memory-backed only — not portable
+| Feature | OverlayFS | Btrfs/ZFS | DM-Snap | **BranchFS** |
+|---------|:---------:|:---------:|:-------:|:------------:|
+| Portable FS | ✓ | ✗ | ✓ | **✓** |
+| Nested branches | ✗* | ✓ | ✗ | **✓** |
+| Commit-to-parent | ✗ | ✗ | ✗ | **✓** |
+| Sibling invalidation | ✗ | ✗ | ✗ | **✓** |
+| No root | ✗ | ✗ | ✗ | **✓** |
 
 </div>
 
-<!--
-Let's look at the gap in filesystem mechanisms.
+<div>
 
-OverlayFS supports stacked overlays since Linux 5.0, but it has no native commit-to-parent or sibling invalidation, and mounting requires root.
+### Process Management
 
-Btrfs and ZFS support nested subvolumes and clones, but they're filesystem-specific — you can't use them on ext4 or NFS. And they lack commit-to-parent semantics.
-
-Device-mapper snapshots require raw block devices and have O(depth) read latency that scales poorly with nesting.
-
-DAXFS is the closest — it provides branching with commit and sibling invalidation — but it targets memory-backed storage exclusively and isn't portable.
-
-Only our BranchFS provides all five properties: portable, nested, commit-to-parent, sibling invalidation, and no root privileges.
--->
-
----
-
-# Gap: Existing Process Management
-
-<div class="text-base mt-2">
-
-| Feature | pgrp | session | cgroup | PID ns | **branch()** |
-|---------|:----:|:-------:|:------:|:------:|:------------:|
-| Reliable termination | ✗ | ✗ | ✓ | ✓ | **✓** |
-| No escape possible | ✗ | ✗ | ✓ | ✓ | **✓** |
-| Sibling isolation | ✗ | ✗ | ✗ | ✓ | **✓** |
-| No setup required | ✓ | ✓ | ✗ | ✗ | **✓** |
-| No root privileges | ✓ | ✓ | ✗† | ✓* | **✓** |
-| No PID 1 complexity | ✓ | ✓ | ✓ | ✗ | **✓** |
+| Feature | pgrp | cgroup | PID ns | **branch()** |
+|---------|:----:|:------:|:------:|:------------:|
+| Reliable termination | ✗ | ✓ | ✓ | **✓** |
+| No escape | ✗ | ✓ | ✓ | **✓** |
+| Sibling isolation | ✗ | ✗ | ✓ | **✓** |
+| No setup / No root | ✓ | ✗ | ✗ | **✓** |
+| No PID 1 overhead | ✓ | ✓ | ✗ | **✓** |
 
 </div>
 
-<div class="mt-2 text-sm">
-
-- **Process groups/sessions**: processes can escape via `setsid()` or `setpgid()`
-- **Cgroups**: reliable termination, but require setup and typically root
-- **PID namespaces**: good isolation, but impose PID 1 init overhead
-
 </div>
 
-<div class="mt-1 text-xs opacity-70">
-†Cgroup v2 delegation can avoid root but requires prior config. *User namespaces can avoid root.
-Composing these in <strong>userspace</strong> creates race windows and fragile error handling.
+<div class="mt-2 text-xs">
+
+- **OverlayFS**: no commit semantics, requires root. **Btrfs/ZFS**: FS-specific. **DM-Snap**: O(depth) latency
+- **Process groups**: escapable via `setsid()`. **Cgroups**: need setup + root. **PID ns**: PID 1 overhead
+- Composing these in **userspace** creates race windows and fragile error handling
+
 </div>
 
 <!--
-Now let's look at process management mechanisms.
+Let's look at the gap. For filesystem branching: OverlayFS lacks commit semantics and requires root. Btrfs and ZFS are filesystem-specific. Device-mapper has O(depth) latency. Only BranchFS checks all boxes.
 
-Process groups and sessions allow group termination, but processes can escape via setsid() or setpgid(). Manual PID tracking via /proc has race conditions.
+For process management: process groups are escapable. Cgroups need setup and root. PID namespaces have PID 1 overhead. And composing these in userspace creates race windows between steps — a process can fork between cgroup creation and migration.
 
-Cgroups provide reliable termination, but require setup and typically need root. They also don't prevent signaling between siblings.
-
-PID namespaces provide complete isolation, but impose PID 1 init overhead.
-
-The fundamental problem is: composing these mechanisms in userspace creates race windows between steps. A process can fork between cgroup creation and migration. Error handling for partial failures is fragile.
-
-Our proposed branch() syscall satisfies all requirements in a single atomic call.
+Our proposed BranchFS and branch() syscall are the only solutions that satisfy all requirements.
 -->
 
 ---
 
 # Our Solution: The Branch Context
 
-<div class="grid grid-cols-2 gap-5 text-base mt-2">
+<div class="grid grid-cols-2 gap-4 text-sm mt-1">
 
 <div>
 
-### Definition
+### Definition & Lifecycle
 
-A **branch context** encapsulates:
-
-1. A **filesystem view**: origin's files overlaid with a copy-on-write delta layer (Δᵢ)
-2. A **process group** whose side effects are confined to the context
-
-### Lifecycle
+A **branch context** = CoW filesystem view (Δᵢ) + confined process group
 
 ```
-  Fork ──► Explore ──► Commit (winner)
-                   └──► Abort  (losers)
+Fork ──► Explore ──► Commit (winner)
+                 └──► Abort  (losers)
 ```
 
-Created in **sets of N siblings** from a single frozen origin.
+**Four Core Properties:**
+
+1. **Frozen origin** — parent read-only; no merge conflicts
+2. **Parallel isolated execution** — N contexts, fully isolated
+3. **First-commit-wins** — siblings auto-invalidated
+4. **Nestable** — sub-contexts form exploration tree
 
 </div>
 
 <div>
 
-### Four Core Semantic Properties
+### Architecture
 
-<div class="border-l-4 border-blue-500 pl-3 mb-2">
+<img src="/fig-architecture.png" class="rounded shadow" style="max-height: 280px;" alt="Architecture" />
 
-**1. Frozen origin** — parent becomes read-only; no merge conflicts by construction
-
-</div>
-
-<div class="border-l-4 border-green-500 pl-3 mb-2">
-
-**2. Parallel isolated execution** — N contexts run simultaneously, fully isolated
-
-</div>
-
-<div class="border-l-4 border-orange-500 pl-3 mb-2">
-
-**3. First-commit-wins** — first to commit wins; siblings auto-invalidated
-
-</div>
-
-<div class="border-l-4 border-purple-500 pl-3">
-
-**4. Nestable contexts** — fork sub-contexts to form an exploration tree
-
+<div class="text-xs opacity-80 mt-1">
+<strong>branch()</strong> = process coordination; <strong>BranchFS</strong> = filesystem CoW
 </div>
 
 </div>
@@ -304,45 +217,11 @@ Created in **sets of N siblings** from a single frozen origin.
 </div>
 
 <!--
-Now let me introduce our solution: the branch context.
+Our solution is the branch context — a new OS abstraction. It encapsulates a copy-on-write filesystem view plus a confined process group. The lifecycle is Fork, Explore, then Commit or Abort.
 
-A branch context encapsulates two things: a filesystem view — the origin's files overlaid with a copy-on-write delta layer — and a process group whose side effects are confined to the context.
+Four properties define the semantics: frozen origin eliminates merge conflicts; parallel isolated execution enables speedup; first-commit-wins provides automatic resolution; and nestability supports hierarchical exploration.
 
-The lifecycle is simple: Fork creates N sibling contexts from a frozen origin. Each context Explores independently. Then one Commits its changes atomically to the parent, and the losers are Aborted.
-
-Four properties define the semantics.
-
-First, frozen origin: the parent becomes read-only when branches exist, eliminating merge conflicts by construction.
-
-Second, parallel isolated execution: all N contexts run simultaneously, fully isolated from each other.
-
-Third, first-commit-wins: the first context to commit wins, and all siblings are automatically invalidated.
-
-Fourth, nestability: a branch context can itself fork sub-contexts, forming an exploration tree — enabling patterns like Tree-of-Thoughts.
--->
-
----
-
-# Architecture Overview
-
-## Two-component design: BranchFS + branch() syscall
-
-<div class="flex justify-center">
-  <img src="/fig-architecture.png" class="rounded shadow-lg" style="max-height: 380px;" alt="Architecture overview" />
-</div>
-
-<div class="text-xs text-center mt-1 opacity-80">
-<strong>branch()</strong> coordinates process creation and mount namespace isolation; <strong>BranchFS</strong> provides filesystem branching with copy-on-write semantics.
-</div>
-
-<!--
-Here's the architecture. The parent process calls branch() to create three children. Each child runs in its own mount namespace.
-
-BranchFS, a FUSE daemon, provides each child with an isolated copy-on-write view of the workspace. Each branch has its own delta layer that captures modifications via copy-on-write. Unmodified files are served directly from the base directory.
-
-When a branch commits, its delta is applied atomically to the parent. Siblings are invalidated.
-
-This is a two-component design: BranchFS handles filesystem isolation, and the branch() syscall handles process coordination. This separation of concerns is important — it means the syscall is filesystem-agnostic.
+The architecture has two components. The branch() syscall coordinates process creation and mount namespace isolation. BranchFS, a FUSE daemon, provides each branch with an isolated copy-on-write view. When a branch commits, its delta is applied atomically to the parent, and siblings are invalidated.
 -->
 
 ---
@@ -539,31 +418,27 @@ Importantly, the syscall is filesystem-agnostic. It communicates with branching 
 
 ---
 
-# Evaluation: Branch Creation — O(1)
+# Preliminary Evaluation
 
-<div class="grid grid-cols-2 gap-6 text-base mt-2">
+<div class="grid grid-cols-3 gap-3 text-xs mt-1">
 
-<div>
+<div class="border-2 border-blue-400 rounded-lg p-3">
 
-### Creation Latency vs. Base Size
+<div class="font-semibold text-blue-600 mb-1 text-sm">Branch Creation — O(1)</div>
 
-| Base Size (files) | Latency |
+| Base Size | Latency |
 |:-:|:-:|
-| 100 | 292 μs |
-| 1,000 | 317 μs |
-| 10,000 | 310 μs |
+| 100 files | 292 μs |
+| 1,000 files | 317 μs |
+| 10,000 files | 310 μs |
 
-<div class="mt-3 p-2 bg-blue-50 rounded border border-blue-300 text-sm">
-Creation latency remains <strong>under 350 μs</strong>, confirming <strong>O(1) cost</strong> — independent of base filesystem size.
-</div>
-
-Branch creation only allocates a new delta directory.
+Independent of base size.
 
 </div>
 
-<div>
+<div class="border-2 border-green-400 rounded-lg p-3">
 
-### Commit & Abort vs. Modification Size
+<div class="font-semibold text-green-600 mb-1 text-sm">Commit & Abort</div>
 
 | Mod. Size | Commit | Abort |
 |:-:|:-:|:-:|
@@ -571,159 +446,65 @@ Branch creation only allocates a new delta directory.
 | 100 KB | 514 μs | 365 μs |
 | 1 MB | 2.1 ms | 890 μs |
 
-<div class="mt-3 p-2 bg-green-50 rounded border border-green-300 text-sm">
-Commit cost is proportional to <strong>modified data volume</strong>, not total FS size. Under <strong>1 ms</strong> for small changes.
-</div>
-
-Abort is even faster — just removes the delta layer.
+Proportional to mod size.
 
 </div>
 
+<div class="border-2 border-purple-400 rounded-lg p-3">
+
+<div class="font-semibold text-purple-600 mb-1 text-sm">I/O Throughput</div>
+
+| Mode | Read |
+|:-:|:-:|
+| Native | 8.8 GB/s |
+| FUSE | 1.7 GB/s |
+| Passthrough | **7.2 GB/s** |
+
+82% native with passthrough.
+
 </div>
 
-<div class="mt-2 text-xs text-center opacity-70">
+</div>
+
+<div class="mt-2 text-sm text-center">
+Agent workloads dominated by <strong>LLM API latency</strong> (100 ms – 10 s) — BranchFS I/O overhead is <strong>negligible</strong>.
+</div>
+
+<div class="mt-1 text-xs text-center opacity-60">
 Hardware: AMD Ryzen 5 5500U, 8 GB DDR4, NVMe SSD. Median of 10 trials. BranchFS: ~3,400 lines of Rust, FUSE 3.
 </div>
 
 <!--
-Let me walk through the evaluation results. We tested BranchFS on a modest AMD Ryzen system with an NVMe SSD.
+For evaluation, branch creation is O(1) — under 350 microseconds regardless of base size, because it just allocates a delta directory.
 
-For branch creation, the key result is O(1) cost. Whether the base directory has 100, 1,000, or 10,000 files, creation latency remains under 350 microseconds. This is because creation just allocates a new delta directory — it doesn't copy any files.
+Commit cost is proportional to modification size: under 1 millisecond for small changes, about 2 milliseconds for 1 megabyte. Abort is even faster.
 
-For commit and abort, the cost is proportional to the modification size, not the total filesystem size. Commit takes about 317 microseconds for 1 kilobyte of changes, 514 microseconds for 100 kilobytes, and about 2 milliseconds for 1 megabyte.
+For I/O throughput, with FUSE passthrough mode we achieve 7.2 gigabytes per second read — 82% of native. Write actually exceeds native because we treat fsync as a no-op for ephemeral branches.
 
-Abort is even faster since it just removes the delta layer without copying anything.
-
-These numbers are well within the requirements for agent workloads.
+Most importantly, agent workloads are dominated by LLM API latency of 100ms to 10 seconds, so BranchFS overhead is negligible in practice.
 -->
 
 ---
 
-# Evaluation: I/O Throughput
+# Related Work & Future Directions
 
-<div class="text-base mt-2">
-
-### Sequential Read/Write (50 MB file, 64 KB blocks)
-
-| Mode | Read | Write |
-|:-:|:-:|:-:|
-| Native filesystem | 8,800 MB/s | 576 MB/s |
-| BranchFS (regular FUSE) | 1,655 MB/s | 631 MB/s |
-| BranchFS (passthrough) | **7,236 MB/s** (82% native) | 719 MB/s |
-
-</div>
-
-<div class="grid grid-cols-2 gap-6 text-sm mt-3">
-
-<div class="border-l-4 border-blue-500 pl-3">
-
-**Passthrough mode** (`FOPEN_PASSTHROUGH`): bypasses the FUSE daemon for unmodified files → 82% of native read throughput
-
-</div>
-
-<div class="border-l-4 border-green-500 pl-3">
-
-**Write exceeds native**: BranchFS treats `fsync` as no-op for ephemeral branches — durability enforced at commit time, not per-write
-
-</div>
-
-</div>
-
-<div class="mt-4 p-3 bg-yellow-50 rounded border border-yellow-300 text-base text-center">
-Agent workloads are dominated by <strong>LLM API latency</strong> (100 ms – 10 s).<br/>I/O overhead from BranchFS is <strong>negligible</strong> in practice.
-</div>
-
-<!--
-For I/O throughput, we benchmarked sequential reads and writes on a 50 megabyte file.
-
-With regular FUSE, read throughput is about 1.7 gigabytes per second — 19% of native. This gap reflects the FUSE kernel-to-userspace roundtrip.
-
-But with FUSE passthrough mode, which bypasses the daemon for unmodified files, we achieve 7.2 gigabytes per second — 82% of native performance. This is a significant improvement.
-
-Interestingly, write performance slightly exceeds native. This is because BranchFS treats fsync as a no-op for ephemeral branches — durability is enforced at commit time, not per-write. This avoids the SSD sync cost.
-
-But the most important point is: agent workloads are dominated by LLM API latency, which is 100 milliseconds to 10 seconds. The I/O overhead from BranchFS is negligible in practice.
--->
-
----
-
-# Related Work
-
-<div class="grid grid-cols-2 gap-5 text-sm mt-1">
+<div class="grid grid-cols-2 gap-4 text-xs mt-1">
 
 <div>
 
-### Isolation Mechanisms
+### Related Work
 
-- **Containers** (Docker): namespaces + cgroups — general containment, not branching
-- **gVisor**: kernel-level sandboxing
-- **lwCs**: lightweight intra-process contexts
-- **Dune**: HW virtualization for user-level sandboxing
-- **Capsicum**: capability-based sandboxing
-
-### OS Speculation & Transactions
-
-- **Speculator**: speculative execution for distributed FS
-- **TxOS**: OS-level ACID transactions
-
-</div>
-
-<div>
-
-### Key Differentiators
-
-<div class="border-l-4 border-blue-500 pl-3 mb-2">
-
-**vs. Speculator**: parallel N-way exploration (not sequential); competitive first-commit-wins (not owner-decided); local agent workloads (not distributed systems)
-
-</div>
-
-<div class="border-l-4 border-green-500 pl-3 mb-2">
-
-**vs. TxOS**: nestable (not flat); long-lived (not short); userspace FUSE (not deep kernel mods)
-
-</div>
-
-<div class="border-l-4 border-orange-500 pl-3">
-
-**vs. Containers/VMs**: lightweight CoW branching with commit/abort semantics — not general containment
-
-</div>
-
-</div>
-
-</div>
-
-<!--
-Let me briefly position this against related work.
-
-For isolation, containers and VMs provide general-purpose containment but not branching semantics with commit and abort.
-
-The closest prior work is Speculator, which pioneered OS-level speculative execution. But Speculator targets distributed file systems for network latency reduction, uses sequential speculation with owner-decided acceptance. Our branch contexts support parallel N-way exploration with competitive first-commit-wins resolution for local agent workloads.
-
-TxOS introduced OS-level ACID transactions, but they're flat, short-lived, and require deep kernel modifications. Our branch contexts are nestable, can persist for arbitrary durations, and operate entirely in userspace via FUSE.
--->
-
----
-
-# Discussion and Future Work
-
-<div class="grid grid-cols-2 gap-5 text-sm mt-1">
-
-<div>
+- **Containers/gVisor/Dune**: general containment, not branching
+- **Speculator**: sequential speculation for distributed FS — we do parallel N-way with first-commit-wins
+- **TxOS**: flat, short-lived OS transactions — we're nestable, long-lived, userspace FUSE
+- **lwCs/Capsicum**: different isolation granularity
 
 ### Current Limitations
 
-- **External side effects** (network, IPC) not rolled back on abort
-- **Single-winner** semantics only — no multi-branch merge
-- File-level CoW limitations: symlinks, hardlinks, special files
+- **External side effects** (network, IPC) not rolled back
+- **Single-winner** only — no multi-branch merge
+- File-level CoW: symlinks, hardlinks unsupported
 - **BR_MEMORY** not yet implemented
-
-### Broader Applicability
-
-- `n_branches=1` → **try-and-rollback**
-  - Package management: try upgrade, abort if it breaks
-  - System configuration tuning
 
 </div>
 
@@ -733,25 +514,25 @@ TxOS introduced OS-level ACID transactions, but they're flat, short-lived, and r
 
 <div class="border-l-4 border-blue-500 pl-3 mb-2">
 
-**Effect gating** — buffer network/IPC until commit; agent gateways (e.g., Agentry) provide natural interposition points
+**Effect gating** — buffer network/IPC until commit; agent gateways provide interposition points
 
 </div>
 
 <div class="border-l-4 border-green-500 pl-3 mb-2">
 
-**Multi-branch merge** — union of non-overlapping changes; conflict detection for overlapping files
+**Multi-branch merge** — union non-overlapping changes; conflict detection
 
 </div>
 
 <div class="border-l-4 border-purple-500 pl-3 mb-2">
 
-**Implementation roadmap** — prototype `branch()` on Linux 6.19; BR_FS + BR_ISOLATE first
+**Roadmap** — prototype `branch()` on Linux 6.19; BR_FS + BR_ISOLATE first
 
 </div>
 
 <div class="border-l-4 border-orange-500 pl-3">
 
-**Agent integration** — most agents checkpoint via files → BR_FS-only covers most current use cases
+**Broader use** — `n_branches=1` → try-and-rollback for package mgmt, system tuning
 
 </div>
 
@@ -760,17 +541,13 @@ TxOS introduced OS-level ACID transactions, but they're flat, short-lived, and r
 </div>
 
 <!--
-Let me discuss limitations and future directions.
+Let me position this against related work and discuss future directions.
 
-Currently, we only isolate filesystem state. External side effects like network calls and IPC are not rolled back on abort. To address this, we're exploring effect gating — buffering external actions until commit and discarding them on abort. Agent gateways like Agentry provide natural interposition points for this.
+Containers and VMs provide general containment but not branching. Speculator pioneered OS speculation but is sequential and owner-decided — we do parallel N-way with competitive first-commit-wins. TxOS has flat, short-lived transactions requiring deep kernel mods — ours are nestable and run in userspace.
 
-We also support only single-winner semantics. Multi-branch merge — combining non-overlapping changes from multiple branches — is an important future direction.
+For limitations: we currently only isolate filesystem state, not network or IPC. We support single-winner only. The branch() syscall is still a design proposal.
 
-The implementation roadmap: we plan to prototype the branch() syscall on Linux 6.19, starting with BR_FS and BR_ISOLATE flags, with memory branching as a follow-on effort.
-
-An important practical observation: most current AI agents — Claude Code, SWE-Agent, OpenHands — checkpoint primarily via files rather than process memory. This means BR_FS-only mode covers most use cases today. Agents can run unmodified inside their branch's mount namespace.
-
-Beyond AI agents, the fork-explore-commit abstraction generalizes. With n_branches equals 1, it provides try-and-rollback semantics useful for package management and system configuration tuning.
+Key future directions: effect gating to buffer external actions until commit, multi-branch merge, and prototyping branch() on Linux 6.19. Beyond agents, with n_branches=1 this provides try-and-rollback for package management and system tuning.
 -->
 
 ---
