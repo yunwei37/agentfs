@@ -1,0 +1,4 @@
+# Build artifacts produced by scripts/.
+build/
+test/test_branch
+*.o

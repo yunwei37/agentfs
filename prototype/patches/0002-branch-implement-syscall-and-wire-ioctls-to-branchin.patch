@@ -1,0 +1,590 @@
+From f8b782536ca316f4ec0a82e2fb304844d05c2a6b Mon Sep 17 00:00:00 2001
+From: "branch() prototype" <prototype@branch-syscall.local>
+Date: Thu, 30 Apr 2026 23:01:39 -0700
+Subject: [PATCH 2/3] branch: implement syscall and wire ioctls to branching
+ filesystem
+
+Implement the multiplexed branch(op, attr, size) syscall in
+kernel/branch.c.
+
+BR_CREATE:
+  For each of N children, call vfs_ioctl(mount_fd, FS_IOC_BRANCH_CREATE)
+  to ask the underlying branching filesystem (e.g. BranchFS) to create a
+  fresh branch. The 128-byte branch name returned by the FS is copied to
+  userspace via branch_names[i] and stashed in branch_member->name. Then
+  fork N children; each receives its branch_id (1..N) as the syscall
+  return value, with the parent getting 0 + child_pids[] filled.
+
+BR_COMMIT:
+  The first child to call BR_COMMIT wins via atomic_try_cmpxchg on the
+  group's winner field. Winner's vfs_ioctl(ctl_fd, FS_IOC_BRANCH_COMMIT)
+  merges the FS branch into the parent; the kernel then SIGKILLs all
+  sibling tasks in the group. Losers see a non-zero winner and return
+  -ESTALE without ever touching the FS.
+
+BR_ABORT:
+  vfs_ioctl(ctl_fd, FS_IOC_BRANCH_ABORT) discards the FS branch, then
+  the calling task exits via do_exit(0).
+
+Use get_task_struct() to pin sibling task pointers under the group
+spinlock before SIGKILL, avoiding lock-order issues with sighand
+->siglock.
+
+Add CONFIG_BRANCH (default y), allocate syscall #470 in syscall_64.tbl,
+declare sys_branch in linux/syscalls.h, and wire kernel/branch.o into
+kernel/Makefile.
+
+This commit only adds the syscall; the fork/exit hook required to
+actually deliver branch_id to children and free branch_member on exit
+is added in a follow-up commit so it can be reviewed separately.
+---
+ arch/x86/entry/syscalls/syscall_64.tbl |   1 +
+ include/linux/syscalls.h               |   2 +
+ init/Kconfig                           |  17 +
+ kernel/Makefile                        |   1 +
+ kernel/branch.c                        | 461 +++++++++++++++++++++++++
+ 5 files changed, 482 insertions(+)
+ create mode 100644 kernel/branch.c
+
+diff --git a/arch/x86/entry/syscalls/syscall_64.tbl b/arch/x86/entry/syscalls/syscall_64.tbl
+index 92cf0fe22..0ca7b5a09 100644
+--- a/arch/x86/entry/syscalls/syscall_64.tbl
++++ b/arch/x86/entry/syscalls/syscall_64.tbl
+@@ -393,6 +393,7 @@
+ 467	common	open_tree_attr		sys_open_tree_attr
+ 468	common	file_getattr		sys_file_getattr
+ 469	common	file_setattr		sys_file_setattr
++470	common	branch			sys_branch
+ 
+ #
+ # Due to a historical design error, certain syscalls are numbered differently
+diff --git a/include/linux/syscalls.h b/include/linux/syscalls.h
+index 77f45e5d4..51346640c 100644
+--- a/include/linux/syscalls.h
++++ b/include/linux/syscalls.h
+@@ -79,6 +79,7 @@ struct statmount;
+ struct mnt_id_req;
+ struct xattr_args;
+ struct file_attr;
++union branch_attr;
+ 
+ #include <linux/types.h>
+ #include <linux/aio_abi.h>
+@@ -378,6 +379,7 @@ asmlinkage long sys_file_getattr(int dfd, const char __user *filename,
+ asmlinkage long sys_file_setattr(int dfd, const char __user *filename,
+ 				 struct file_attr __user *attr, size_t usize,
+ 				 unsigned int at_flags);
++asmlinkage long sys_branch(int op, union branch_attr __user *attr, size_t size);
+ asmlinkage long sys_getcwd(char __user *buf, unsigned long size);
+ asmlinkage long sys_eventfd2(unsigned int count, int flags);
+ asmlinkage long sys_epoll_create1(int flags);
+diff --git a/init/Kconfig b/init/Kconfig
+index ecddb94db..7ac3df6a7 100644
+--- a/init/Kconfig
++++ b/init/Kconfig
+@@ -2115,6 +2115,23 @@ config TRACEPOINTS
+ 
+ source "kernel/Kconfig.kexec"
+ 
++config BRANCH
++	bool "branch() syscall: OS primitives for agentic exploration"
++	default y
++	help
++	  Enable the branch() syscall, a multiplexed system call that
++	  spawns N child processes into an exclusive branch group with
++	  first-commit-wins resolution. See "Fork, Explore, Commit:
++	  OS Primitives for Agentic Exploration" (ASPLOS 2026 Agentic
++	  OS Workshop).
++
++	  This is an experimental MVP. With BR_FS, kernel forwards
++	  FS_IOC_BRANCH_CREATE/COMMIT/ABORT ioctls to the underlying
++	  branching filesystem (e.g. BranchFS). Memory branching
++	  (BR_MEMORY) is not yet implemented.
++
++	  If unsure, say Y.
++
+ endmenu		# General setup
+ 
+ source "arch/Kconfig"
+diff --git a/kernel/Makefile b/kernel/Makefile
+index c60623448..04e48bf91 100644
+--- a/kernel/Makefile
++++ b/kernel/Makefile
+@@ -14,6 +14,7 @@ obj-y     = fork.o exec_domain.o panic.o \
+ 
+ obj-$(CONFIG_MULTIUSER) += groups.o
+ obj-$(CONFIG_VHOST_TASK) += vhost_task.o
++obj-$(CONFIG_BRANCH) += branch.o
+ 
+ ifdef CONFIG_FUNCTION_TRACER
+ # Do not trace internal ftrace files
+diff --git a/kernel/branch.c b/kernel/branch.c
+new file mode 100644
+index 000000000..a48e8ecdc
+--- /dev/null
++++ b/kernel/branch.c
+@@ -0,0 +1,461 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * branch() syscall: OS primitives for agentic exploration.
++ *
++ * Implements the multiplexed branch(op, attr, size) syscall described in
++ * "Fork, Explore, Commit: OS Primitives for Agentic Exploration"
++ * (ASPLOS 2026 Agentic OS Workshop).
++ *
++ * BR_CREATE:
++ *   For each of N children, call vfs_ioctl(mount_fd, FS_IOC_BRANCH_CREATE)
++ *   to ask the underlying branching filesystem (e.g. BranchFS) to create
++ *   a fresh branch. The 128-byte branch name returned by the FS is copied
++ *   to userspace via branch_names[i] and also stashed in branch_member.
++ *   Then fork N children; each receives its branch_id (1..N) as the syscall
++ *   return value (parent gets 0 with child_pids[] filled).
++ *
++ * BR_COMMIT:
++ *   The first child to call BR_COMMIT wins via atomic CAS on the group's
++ *   `winner` field. Winner's vfs_ioctl(ctl_fd, FS_IOC_BRANCH_COMMIT) merges
++ *   its FS branch into the parent; the kernel then SIGKILLs all sibling
++ *   tasks. Losers see a non-zero `winner` and return -ESTALE without
++ *   touching the FS.
++ *
++ * BR_ABORT:
++ *   vfs_ioctl(ctl_fd, FS_IOC_BRANCH_ABORT) discards the FS branch, then
++ *   the calling task exits. If all siblings abort, the parent resumes.
++ *
++ * Caller responsibilities for BR_FS:
++ *   - Mount BranchFS at some workspace dir, e.g. /work.
++ *   - Open /work/.branchfs_ctl and pass that fd as `mount_fd` for BR_CREATE.
++ *   - For each child: chdir into /work/@<branch_name>/, do work, then open
++ *     /work/@<branch_name>/.branchfs_ctl and pass that fd as `ctl_fd` for
++ *     BR_COMMIT or BR_ABORT.
++ *
++ * Not yet implemented (paper roadmap "follow-on effort"):
++ *   - BR_MEMORY: page-table COW.
++ *   - Mount-namespace + bind-mount setup so children see their branch as
++ *     /work transparently (avoiding the chdir(@<name>) requirement).
++ */
++
++#include <linux/branch.h>
++#include <linux/cred.h>
++#include <linux/errno.h>
++#include <linux/file.h>
++#include <linux/fs.h>
++#include <linux/kernel.h>
++#include <linux/printk.h>
++#include <linux/sched.h>
++#include <linux/sched/signal.h>
++#include <linux/sched/task.h>
++#include <linux/signal.h>
++#include <linux/slab.h>
++#include <linux/spinlock.h>
++#include <linux/syscalls.h>
++#include <linux/uaccess.h>
++#include <uapi/linux/branch.h>
++
++#include <linux/sched/task_stack.h>
++#include <asm/ptrace.h>
++
++/* ---------- group / member lifecycle ---------- */
++
++static struct branch_group *branch_group_alloc(u32 n, u32 flags)
++{
++	struct branch_group *g;
++
++	g = kzalloc(sizeof(*g), GFP_KERNEL);
++	if (!g)
++		return NULL;
++
++	refcount_set(&g->refcount, 1);
++	atomic_set(&g->winner, 0);
++	g->n_branches = n;
++	g->flags = flags;
++	spin_lock_init(&g->lock);
++	INIT_LIST_HEAD(&g->members);
++	g->parent = current;
++	return g;
++}
++
++static void branch_group_get(struct branch_group *g)
++{
++	refcount_inc(&g->refcount);
++}
++
++static void branch_group_put(struct branch_group *g)
++{
++	if (refcount_dec_and_test(&g->refcount))
++		kfree(g);
++}
++
++static struct branch_member *branch_member_alloc(struct branch_group *g, u32 id)
++{
++	struct branch_member *m;
++
++	m = kzalloc(sizeof(*m), GFP_KERNEL);
++	if (!m)
++		return NULL;
++
++	m->group = g;
++	m->branch_id = id;
++	m->aborted = false;
++	branch_group_get(g);
++
++	spin_lock(&g->lock);
++	list_add_tail(&m->node, &g->members);
++	spin_unlock(&g->lock);
++	return m;
++}
++
++static void branch_member_free(struct branch_member *m)
++{
++	struct branch_group *g = m->group;
++
++	spin_lock(&g->lock);
++	list_del(&m->node);
++	spin_unlock(&g->lock);
++	branch_group_put(g);
++	kfree(m);
++}
++
++/*
++ * Called from fork (copy_process). Parent stages a branch_member in
++ * branch_pending; child inherits it as its `branch`. branch_member_alloc
++ * already added one ref for this member; ownership passes from parent's
++ * pending pointer to the child's branch pointer.
++ */
++void branch_fork_inherit(struct task_struct *p)
++{
++	struct branch_member *m = current->branch_pending;
++
++	p->branch = m;
++	p->branch_pending = NULL;
++
++	if (!m)
++		return;
++
++	m->task = p;
++
++	/*
++	 * Set the child's syscall return value to its branch_id so it
++	 * resumes from branch(BR_CREATE) with that as the return.
++	 */
++	task_pt_regs(p)->ax = m->branch_id;
++}
++
++/* Called from do_exit. Releases the member if the task was in a branch. */
++void branch_exit(struct task_struct *p)
++{
++	struct branch_member *m = p->branch;
++
++	if (!m)
++		return;
++
++	p->branch = NULL;
++	branch_member_free(m);
++}
++
++/* ---------- BR_CREATE ---------- */
++
++/*
++ * Issue FS_IOC_BRANCH_CREATE on the workspace ctl fd. Pass the user's
++ * per-child name buffer as the ioctl arg so FUSE can copy_to_user the
++ * 128-byte branch name directly. We re-read it kernel-side afterward
++ * to stash a copy in branch_member.
++ */
++static int fs_create_branch(struct file *workspace,
++			    char __user *user_name_buf,
++			    char *kname /* out, BR_NAME_MAX bytes */)
++{
++	long ret;
++
++	ret = vfs_ioctl(workspace, FS_IOC_BRANCH_CREATE,
++			(unsigned long)user_name_buf);
++	if (ret < 0)
++		return (int)ret;
++
++	if (copy_from_user(kname, user_name_buf, BR_NAME_MAX))
++		return -EFAULT;
++
++	kname[BR_NAME_MAX - 1] = '\0';
++	return 0;
++}
++
++static int do_branch_create(union branch_attr *attr)
++{
++	struct branch_group *g;
++	struct branch_member **members = NULL;
++	pid_t *pids = NULL;
++	pid_t __user *upids;
++	char __user (*unames)[BR_NAME_MAX] = NULL;
++	struct file *workspace = NULL;
++	u32 i, n;
++	int ret = 0;
++
++	if (attr->create.flags & ~BR_CREATE_FLAGS_ALL)
++		return -EINVAL;
++
++	if (attr->create.flags & BR_MEMORY)
++		return -EOPNOTSUPP;
++
++	n = attr->create.n_branches;
++	if (n == 0 || n > BR_MAX_BRANCHES)
++		return -EINVAL;
++
++	upids = (pid_t __user *)(uintptr_t)attr->create.child_pids;
++	if (!upids)
++		return -EFAULT;
++
++	if (attr->create.flags & BR_FS) {
++		unames = (char __user (*)[BR_NAME_MAX])(uintptr_t)attr->create.branch_names;
++		if (!unames)
++			return -EFAULT;
++	}
++
++	if (current->branch)
++		return -EBUSY;
++
++	if (attr->create.flags & BR_FS) {
++		workspace = fget(attr->create.mount_fd);
++		if (!workspace)
++			return -EBADF;
++	}
++
++	g = branch_group_alloc(n, attr->create.flags);
++	if (!g) {
++		ret = -ENOMEM;
++		goto out_putfile;
++	}
++
++	pids = kcalloc(n, sizeof(*pids), GFP_KERNEL);
++	members = kcalloc(n, sizeof(*members), GFP_KERNEL);
++	if (!pids || !members) {
++		ret = -ENOMEM;
++		goto out_free;
++	}
++
++	/* Phase 1: ask FS to create N branches. */
++	if (attr->create.flags & BR_FS) {
++		for (i = 0; i < n; i++) {
++			members[i] = branch_member_alloc(g, i + 1);
++			if (!members[i]) {
++				ret = -ENOMEM;
++				goto cleanup_partial;
++			}
++			ret = fs_create_branch(workspace, unames[i],
++					       members[i]->name);
++			if (ret)
++				goto cleanup_partial;
++		}
++	} else {
++		for (i = 0; i < n; i++) {
++			members[i] = branch_member_alloc(g, i + 1);
++			if (!members[i]) {
++				ret = -ENOMEM;
++				goto cleanup_partial;
++			}
++		}
++	}
++
++	/* Phase 2: fork N children. */
++	for (i = 0; i < n; i++) {
++		struct kernel_clone_args args = {
++			.flags		= SIGCHLD,
++			.exit_signal	= SIGCHLD,
++		};
++		pid_t pid;
++
++		current->branch_pending = members[i];
++		pid = kernel_clone(&args);
++		current->branch_pending = NULL;
++
++		if (pid < 0) {
++			ret = pid;
++			goto cleanup_after_fork;
++		}
++		pids[i] = pid;
++	}
++
++	if (copy_to_user(upids, pids, n * sizeof(pid_t))) {
++		ret = -EFAULT;
++		goto cleanup_after_fork;
++	}
++
++	ret = 0;
++	goto out_free;
++
++cleanup_partial:
++	for (i = 0; i < n; i++) {
++		if (members[i]) {
++			branch_member_free(members[i]);
++			members[i] = NULL;
++		}
++	}
++	goto out_free;
++
++cleanup_after_fork:
++	{
++		u32 j;
++
++		for (j = 0; j < i; j++) {
++			struct task_struct *t;
++
++			rcu_read_lock();
++			t = find_task_by_vpid(pids[j]);
++			if (t)
++				send_sig(SIGKILL, t, 1);
++			rcu_read_unlock();
++		}
++	}
++
++out_free:
++	kfree(pids);
++	kfree(members);
++	branch_group_put(g);
++out_putfile:
++	if (workspace)
++		fput(workspace);
++	return ret;
++}
++
++/* ---------- BR_COMMIT ---------- */
++
++static int do_branch_commit(union branch_attr *attr)
++{
++	struct branch_member *m = current->branch;
++	struct branch_group *g;
++	struct branch_member *sib;
++	struct file *ctl_file = NULL;
++	int prev;
++	long ioret = 0;
++
++	if (attr->commit.flags != 0)
++		return -EINVAL;
++	if (!m)
++		return -EINVAL;
++
++	g = m->group;
++
++	/* First-commit-wins. */
++	prev = 0;
++	if (!atomic_try_cmpxchg(&g->winner, &prev, m->branch_id))
++		return -ESTALE;
++
++	if (g->flags & BR_FS) {
++		if (attr->commit.ctl_fd < 0) {
++			pr_warn("branch: BR_FS commit without ctl_fd\n");
++			ioret = -EBADF;
++		} else {
++			ctl_file = fget(attr->commit.ctl_fd);
++			if (!ctl_file) {
++				ioret = -EBADF;
++			} else {
++				ioret = vfs_ioctl(ctl_file,
++						  FS_IOC_BRANCH_COMMIT, 0);
++			}
++		}
++		if (ioret < 0)
++			pr_warn("branch: FS commit failed for '%s' (%ld)\n",
++				m->name, ioret);
++	}
++
++	pr_debug("branch: pid=%d won group commit (winner=%u/%u name='%s')\n",
++		 task_pid_vnr(current), m->branch_id, g->n_branches, m->name);
++
++	{
++		struct task_struct **kill_list;
++		u32 cap = g->n_branches;
++		u32 nk = 0, k;
++
++		kill_list = kcalloc(cap, sizeof(*kill_list), GFP_KERNEL);
++		if (kill_list) {
++			spin_lock(&g->lock);
++			list_for_each_entry(sib, &g->members, node) {
++				if (sib == m || !sib->task)
++					continue;
++				get_task_struct(sib->task);
++				kill_list[nk++] = sib->task;
++				if (nk >= cap)
++					break;
++			}
++			spin_unlock(&g->lock);
++
++			for (k = 0; k < nk; k++) {
++				send_sig(SIGKILL, kill_list[k], 1);
++				put_task_struct(kill_list[k]);
++			}
++			kfree(kill_list);
++		}
++	}
++
++	if (ctl_file)
++		fput(ctl_file);
++
++	current->branch = NULL;
++	branch_member_free(m);
++	return ioret < 0 ? (int)ioret : 0;
++}
++
++/* ---------- BR_ABORT ---------- */
++
++static int do_branch_abort(union branch_attr *attr)
++{
++	struct branch_member *m = current->branch;
++	struct file *ctl_file = NULL;
++	long ioret = 0;
++
++	if (attr->abort.flags != 0)
++		return -EINVAL;
++	if (!m)
++		return -EINVAL;
++
++	if (m->group->flags & BR_FS) {
++		if (attr->abort.ctl_fd < 0) {
++			pr_warn("branch: BR_FS abort without ctl_fd\n");
++		} else {
++			ctl_file = fget(attr->abort.ctl_fd);
++			if (ctl_file) {
++				ioret = vfs_ioctl(ctl_file,
++						  FS_IOC_BRANCH_ABORT, 0);
++				if (ioret < 0)
++					pr_warn("branch: FS abort failed for '%s' (%ld)\n",
++						m->name, ioret);
++			}
++		}
++	}
++
++	if (ctl_file)
++		fput(ctl_file);
++
++	m->aborted = true;
++	pr_debug("branch: pid=%d aborting (branch_id=%u name='%s')\n",
++		 task_pid_vnr(current), m->branch_id, m->name);
++
++	do_exit(0);
++	return 0; /* unreachable */
++}
++
++/* ---------- syscall entry ---------- */
++
++SYSCALL_DEFINE3(branch, int, op, union branch_attr __user *, uattr, size_t, size)
++{
++	union branch_attr attr;
++
++	if (size == 0 || size > sizeof(attr))
++		return -EINVAL;
++	memset(&attr, 0, sizeof(attr));
++	if (copy_from_user(&attr, uattr, size))
++		return -EFAULT;
++
++	switch (op) {
++	case BR_CREATE:
++		return do_branch_create(&attr);
++	case BR_COMMIT:
++		return do_branch_commit(&attr);
++	case BR_ABORT:
++		return do_branch_abort(&attr);
++	default:
++		return -EINVAL;
++	}
++}
+-- 
+2.43.0
+

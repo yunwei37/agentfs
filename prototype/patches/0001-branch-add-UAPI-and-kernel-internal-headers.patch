@@ -1,0 +1,164 @@
+From da36f031a2fd9a43bedb19543e60d6dbfa126919 Mon Sep 17 00:00:00 2001
+From: "branch() prototype" <prototype@branch-syscall.local>
+Date: Thu, 30 Apr 2026 23:00:12 -0700
+Subject: [PATCH 1/3] branch: add UAPI and kernel-internal headers
+
+Add the user-facing API and kernel-internal data structures for the new
+branch() syscall, a multiplexed syscall that spawns N child processes
+into an exclusive branch group with first-commit-wins resolution. See
+"Fork, Explore, Commit: OS Primitives for Agentic Exploration" (ASPLOS
+2026 Agentic OS Workshop).
+
+  include/uapi/linux/branch.h
+    - operation codes BR_CREATE/BR_COMMIT/BR_ABORT
+    - flags BR_FS, BR_MEMORY, BR_ISOLATE, BR_CLOSE_FDS
+    - generic FS ioctls FS_IOC_BRANCH_CREATE/COMMIT/ABORT, with values
+      0x80806200 / 0x6201 / 0x6202 chosen to match the BranchFS FUSE
+      daemon (branchfs/src/platform/linux.rs)
+    - union branch_attr per-op argument struct, including a branch_names
+      output array used by BR_CREATE to return per-child branch names
+
+  include/linux/branch.h
+    - struct branch_group: refcount + atomic winner CAS, member list
+    - struct branch_member: per-task membership, includes name[BR_NAME_MAX]
+      to stash the name returned by FS_IOC_BRANCH_CREATE
+    - branch_fork_inherit() / branch_exit() prototypes
+---
+ include/linux/branch.h      | 51 ++++++++++++++++++++++++++++
+ include/uapi/linux/branch.h | 66 +++++++++++++++++++++++++++++++++++++
+ 2 files changed, 117 insertions(+)
+ create mode 100644 include/linux/branch.h
+ create mode 100644 include/uapi/linux/branch.h
+
+diff --git a/include/linux/branch.h b/include/linux/branch.h
+new file mode 100644
+index 000000000..42ebb0489
+--- /dev/null
++++ b/include/linux/branch.h
+@@ -0,0 +1,51 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++#ifndef _LINUX_BRANCH_H
++#define _LINUX_BRANCH_H
++
++#include <linux/atomic.h>
++#include <linux/list.h>
++#include <linux/refcount.h>
++#include <linux/spinlock.h>
++#include <linux/types.h>
++#include <uapi/linux/branch.h>
++
++struct task_struct;
++
++/*
++ * One branch_group per BR_CREATE call. Shared by parent and all N
++ * children. First-commit-wins is decided by atomic CAS on `winner`.
++ */
++struct branch_group {
++	refcount_t		refcount;
++	atomic_t		winner;		/* 0 = undecided; else branch_id */
++	u32			n_branches;
++	u32			flags;		/* BR_FS, BR_ISOLATE, ... */
++
++	spinlock_t		lock;
++	struct list_head	members;	/* struct branch_member.node */
++
++	struct task_struct	*parent;	/* the BR_CREATE caller */
++};
++
++/*
++ * One branch_member per child task. Pinned in the child's task_struct
++ * via task->branch. Lifetime tied to branch_group via refcount.
++ */
++struct branch_member {
++	struct branch_group	*group;
++	struct task_struct	*task;		/* set by branch_fork_inherit */
++	u32			branch_id;	/* 1..N */
++	bool			aborted;
++	struct list_head	node;		/* in group->members */
++	char			name[BR_NAME_MAX]; /* FS-assigned name, BR_FS */
++};
++
++#ifdef CONFIG_BRANCH
++void branch_fork_inherit(struct task_struct *p);
++void branch_exit(struct task_struct *p);
++#else
++static inline void branch_fork_inherit(struct task_struct *p) { }
++static inline void branch_exit(struct task_struct *p) { }
++#endif
++
++#endif /* _LINUX_BRANCH_H */
+diff --git a/include/uapi/linux/branch.h b/include/uapi/linux/branch.h
+new file mode 100644
+index 000000000..ce1e1175d
+--- /dev/null
++++ b/include/uapi/linux/branch.h
+@@ -0,0 +1,66 @@
++/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
++/*
++ * branch() syscall - OS primitives for agentic exploration.
++ *
++ * See "Fork, Explore, Commit: OS Primitives for Agentic Exploration"
++ * (ASPLOS 2026 Agentic OS Workshop).
++ */
++#ifndef _UAPI_LINUX_BRANCH_H
++#define _UAPI_LINUX_BRANCH_H
++
++#include <linux/types.h>
++#include <linux/ioctl.h>
++
++/* Operations passed as the first argument to branch(). */
++#define BR_CREATE	1
++#define BR_COMMIT	2
++#define BR_ABORT	3
++
++/* Flags for BR_CREATE. */
++#define BR_FS		(1U << 0)	/* Branch filesystem (mount ns + bind) */
++#define BR_MEMORY	(1U << 1)	/* Branch memory via page-table COW */
++#define BR_ISOLATE	(1U << 2)	/* Sibling signal/ptrace barrier */
++#define BR_CLOSE_FDS	(1U << 3)	/* Close inherited file descriptors */
++
++#define BR_CREATE_FLAGS_ALL \
++	(BR_FS | BR_MEMORY | BR_ISOLATE | BR_CLOSE_FDS)
++
++/*
++ * Generic ioctls for branching filesystems (BranchFS et al.).
++ * CREATE returns the newly-allocated branch name in a 128-byte buffer
++ * (NUL-padded ASCII). COMMIT/ABORT take no argument; the daemon
++ * identifies the branch by which control fd the ioctl is issued on.
++ */
++#define BR_NAME_MAX		128
++#define FS_IOC_BRANCH_CREATE	_IOR('b', 0, char[BR_NAME_MAX])
++#define FS_IOC_BRANCH_COMMIT	_IO('b', 1)
++#define FS_IOC_BRANCH_ABORT	_IO('b', 2)
++
++/*
++ * Per-operation argument struct, passed by the caller via a pointer to
++ * a `union branch_attr`. The caller passes sizeof(union branch_attr) so
++ * the kernel can extend the union with new fields without breaking ABI.
++ */
++union branch_attr {
++	struct {
++		__u32 flags;
++		__s32 mount_fd;		/* fd open on workspace ctl file (BR_FS) */
++		__u32 n_branches;
++		__u32 __pad;
++		__u64 child_pids;	/* pid_t __user *, output, parent only */
++		__u64 branch_names;	/* char (__user *)[N][BR_NAME_MAX], output */
++	} create;
++	struct {
++		__u32 flags;		/* reserved, must be 0 */
++		__s32 ctl_fd;		/* fd open on this branch's ctl file */
++	} commit;
++	struct {
++		__u32 flags;		/* reserved, must be 0 */
++		__s32 ctl_fd;		/* fd open on this branch's ctl file */
++	} abort;
++};
++
++/* Hard limit on N for BR_CREATE — keeps memory bounded; tunable. */
++#define BR_MAX_BRANCHES		64
++
++#endif /* _UAPI_LINUX_BRANCH_H */
+-- 
+2.43.0
+

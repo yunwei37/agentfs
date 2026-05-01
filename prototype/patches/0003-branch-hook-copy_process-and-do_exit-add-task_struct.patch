@@ -1,0 +1,105 @@
+From b3913ba486a87567031622e5c9e20baa5ae85783 Mon Sep 17 00:00:00 2001
+From: "branch() prototype" <prototype@branch-syscall.local>
+Date: Thu, 30 Apr 2026 23:01:57 -0700
+Subject: [PATCH 3/3] branch: hook copy_process and do_exit, add task_struct
+ fields
+
+To deliver each child's branch_id (1..N) as its branch(BR_CREATE) return
+value, override the child's syscall return register before it runs. The
+cleanest place is right after copy_thread() in copy_process(), where
+the child's pt_regs has been duplicated but the task is not yet
+runnable.
+
+The parent stages a pointer to the per-child branch_member in
+current->branch_pending before each kernel_clone();
+branch_fork_inherit() in copy_process moves it to p->branch and writes
+m->branch_id into task_pt_regs(p)->ax.
+
+Add two pointer fields to task_struct under CONFIG_BRANCH:
+
+  struct branch_member *branch;          /* this task's group membership */
+  struct branch_member *branch_pending;  /* parent's per-child stage */
+
+Add branch_exit() to do_exit() so a task that was killed (winner
+SIGKILLs losers) or otherwise exits without explicit BR_COMMIT/BR_ABORT
+still releases its branch_member. This is the only thing that frees
+the group when all members are gone.
+
+When CONFIG_BRANCH=n the hooks are static-inline no-ops in
+linux/branch.h, so this commit has zero overhead and zero behavioural
+change in that case.
+---
+ include/linux/sched.h | 7 +++++++
+ kernel/exit.c         | 4 ++++
+ kernel/fork.c         | 8 ++++++++
+ 3 files changed, 19 insertions(+)
+
+diff --git a/include/linux/sched.h b/include/linux/sched.h
+index e4ce0a768..1aeb9f573 100644
+--- a/include/linux/sched.h
++++ b/include/linux/sched.h
+@@ -1649,6 +1649,13 @@ struct task_struct {
+ 	struct unwind_task_info		unwind_info;
+ #endif
+ 
++#ifdef CONFIG_BRANCH
++	/* branch() syscall: per-task membership in a branch group. */
++	struct branch_member		*branch;
++	/* Set by parent before kernel_clone(); copied to child->branch in fork. */
++	struct branch_member		*branch_pending;
++#endif
++
+ 	/* CPU-specific state of this task: */
+ 	struct thread_struct		thread;
+ 
+diff --git a/kernel/exit.c b/kernel/exit.c
+index 343eb9754..58c93d2af 100644
+--- a/kernel/exit.c
++++ b/kernel/exit.c
+@@ -5,6 +5,7 @@
+  *  Copyright (C) 1991, 1992  Linus Torvalds
+  */
+ 
++#include <linux/branch.h>
+ #include <linux/mm.h>
+ #include <linux/slab.h>
+ #include <linux/sched/autogroup.h>
+@@ -907,6 +908,9 @@ void __noreturn do_exit(long code)
+ 	io_uring_files_cancel();
+ 	exit_signals(tsk);  /* sets PF_EXITING */
+ 
++	/* Release branch_member if this task was in a branch context. */
++	branch_exit(tsk);
++
+ 	seccomp_filter_release(tsk);
+ 
+ 	acct_update_integrals(tsk);
+diff --git a/kernel/fork.c b/kernel/fork.c
+index 6ca8689a8..ecef331a5 100644
+--- a/kernel/fork.c
++++ b/kernel/fork.c
+@@ -13,6 +13,7 @@
+  */
+ 
+ #include <linux/anon_inodes.h>
++#include <linux/branch.h>
+ #include <linux/slab.h>
+ #include <linux/sched/autogroup.h>
+ #include <linux/sched/mm.h>
+@@ -2185,6 +2186,13 @@ __latent_entropy struct task_struct *copy_process(
+ 	if (retval)
+ 		goto bad_fork_cleanup_io;
+ 
++	/*
++	 * If the parent is currently in branch(BR_CREATE), inherit the
++	 * staged branch_member into the child and override the child's
++	 * syscall return value with its branch_id.
++	 */
++	branch_fork_inherit(p);
++
+ 	stackleak_task_init(p);
+ 
+ 	if (pid != &init_struct_pid) {
+-- 
+2.43.0
+
