@@ -17,5 +17,11 @@
   "devDependencies": {
     "@iconify-json/mdi": "^1.2.3",
     "playwright-chromium": "^1.58.2"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild",
+      "playwright-chromium"
+    ]
   }
 }
