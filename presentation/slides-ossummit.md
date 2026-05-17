@@ -23,7 +23,7 @@ Cong Wang¹, Yusheng Zheng²
 </div>
 
 <div class="text-sm opacity-80 mt-2">
-¹Multikernel Technologies, Inc. · ²UC Santa Cruz
+¹Multikernel Technologies, Inc. · ²eunomia-bpf / UCSC
 </div>
 
 </div>
@@ -31,7 +31,7 @@ Cong Wang¹, Yusheng Zheng²
 <!--
 Good morning everyone. I'm here to talk about a new pair of Linux primitives we have been building (a userspace filesystem called BranchFS, and a proposed kernel syscall called branch()) that together give AI agents something the kernel does not currently provide: a clean fork-explore-commit lifecycle for filesystem and process state.
 
-This is joint work between Multikernel Technologies and UC Santa Cruz. The userspace piece is open source and works on any Linux today. The kernel piece is a working prototype against vanilla Linux 6.17.
+This is joint work between Multikernel Technologies and eunomia-bpf. The userspace piece is open source and works on any Linux today. The kernel piece is a working prototype against vanilla Linux 6.17.
 
 Over the next thirty minutes I'll do four things. First, ground us in what an AI agent actually looks like at the Linux level, because if you have not been chasing this hype cycle, you may be surprised how mundane it is from the kernel's point of view. Second, walk through why nothing already in Linux quite fits: OverlayFS, Btrfs, namespaces, cgroups all get partway. Third, show you BranchFS, the FUSE filesystem we wrote to fill that gap. And fourth, walk through the kernel patch series for branch(), boot it under QEMU, and talk about what we want to upstream.
 
@@ -40,47 +40,57 @@ I'll leave roughly ten minutes for questions at the end.
 
 ---
 
-# An AI Agent, From the Kernel's Point of View
+# Agenda
 
-<div class="grid grid-cols-2 gap-5 text-sm mt-1">
+<div class="text-xl mt-5 leading-loose">
 
-<div>
+1. **Background**: AI agents as ordinary Linux workloads
+2. **Problem**: speculative execution leaves real filesystem and process side effects
+3. **Requirements**: what fork-explore-commit needs from the OS
+4. **Design**: branch contexts as the abstraction
+5. **Implementation**: BranchFS in userspace, `branch()` in the kernel
+6. **Evaluation & Status**: latency, demo, limitations, roadmap
 
-An "AI agent" is a process that, in a loop:
+</div>
 
-1. Asks an LLM what to do next
-2. Runs a **shell command** or **edits a file** locally
-3. Feeds the result back to the LLM
+<!--
+Here is the roadmap for the talk.
 
-That's it. From `strace`, it looks like:
+First, I'll give the background: what an agent looks like to Linux. It is a normal process doing normal filesystem operations.
 
-```text
-execve("/bin/sh", ["sh", "-c", "pytest -x"], ...)
-openat(AT_FDCWD, "src/parser.py", O_WRONLY|O_TRUNC)
-write(3, "def parse(s):\n    ...", 4096)
-execve("/usr/bin/git", ["git", "apply", "fix.patch"])
-execve("/usr/bin/npm", ["npm", "install", "lodash"])
-unlink("node_modules/.package-lock.json")
-```
+Then I'll state the problem: those normal operations become speculative side effects when agents explore multiple paths.
+
+From there, we'll turn that problem into requirements, then into the branch context design. The implementation has two halves: BranchFS in userspace and branch() in the kernel. Finally, I'll show latency numbers, a demo, current limitations, and the roadmap.
+-->
+
+---
+
+# What Is an AI Agent?
+
+<div class="grid grid-cols-2 gap-6 text-base mt-3">
+
+<div class="text-xl leading-relaxed">
+
+An **AI agent** is a control loop:
+
+1. **Reason** with an LLM
+2. **Act** in a local workspace with tool calls (shell commands, file edits)
+3. **Observe** the result and repeat
 
 </div>
 
 <div>
 
-### Concrete examples
+### Examples
 
-- **Claude Code, SWE-agent, OpenHands**: edit your repo and run your tests
-- **Aider, Cursor agents**: same, in an editor
-- **Devin, OpenAI Codex CLI**: same, hosted
+| Tool class | What it does locally |
+|------------|----------------------|
+| **Claude Code, SWE-agent, OpenHands** | edit your repo and run your tests |
+| **Aider, Cursor agents** | same loop inside an editor |
+| **Devin, OpenAI Codex CLI** | same loop on a hosted machine |
 
-### What this means for Linux
-
-- They run as **ordinary processes**
-- They produce **ordinary side effects**: dirty trees, installed packages, build artifacts, modified dotfiles
-- Nothing in the kernel knows these processes are "speculative"
-
-<div class="mt-2 p-2 bg-blue-50 rounded border border-blue-300 text-xs">
-The OS sees a normal Unix workload. The agent's <em>intent</em> ("this is one of three things I'm trying") is invisible.
+<div class="mt-4 p-3 rounded border-2 border-dashed border-red-400 text-sm">
+In systems terms: the agent has authority to mutate a workspace.
 </div>
 
 </div>
@@ -90,20 +100,16 @@ The OS sees a normal Unix workload. The agent's <em>intent</em> ("this is one of
 <!--
 Let me start by demystifying what an AI agent actually is, because the term is doing a lot of work.
 
-From the kernel's point of view, an agent is mind-numbingly ordinary. It's a process (usually Python or Node) sitting in a loop. Each iteration, it asks a large language model what to do, then it runs that thing locally. The "thing" is almost always either a shell command or a file edit.
+For this talk, an agent is a control loop. It reasons with a language model, acts in a local workspace, observes the result, and repeats. The action is usually either a shell command or a file edit.
 
-If you strace one of these tools (and I encourage you to do this when you go home, it's revealing) you see the same calls you'd see from a developer at a terminal. execve of /bin/sh. openat and write on source files. git apply. npm install. unlink. The agent is just typing faster than you can.
+The examples you've probably heard of all fit this shape. Claude Code, SWE-agent, and OpenHands edit your repository and run your tests. Aider and Cursor agents do the same thing inside an editor. Devin and the Codex CLI do it on hosted machines.
 
-The concrete tools you've probably heard of fall into this pattern: Claude Code, SWE-agent, OpenHands edit your repository and run your tests. Aider and the Cursor agents do the same thing inside an editor. Devin and the Codex CLI do it on a hosted box.
-
-The thing I want you to take away from this slide is: these processes look completely normal to the kernel. They generate dirty working trees. They install packages. They modify your dotfiles. They scribble build artifacts. There is nothing in Linux today that knows these processes are speculative (that they're one of N things being tried) and so there is nothing to clean up after them when the bet doesn't pay off.
-
-That's the gap we're trying to fill.
+Next, let's look at the pattern that makes this interesting: agents are starting to fork exploration paths.
 -->
 
 ---
 
-# The New Pattern: Parallel Exploration
+# Agent Exploration and Forking
 
 <div class="grid grid-cols-2 gap-5 text-sm mt-1">
 
@@ -113,13 +119,13 @@ Agents increasingly try **multiple paths in parallel**, then keep the winner:
 
 | Pattern | What it does |
 |---------|-------------|
-| **Best-of-N** | Run N candidates, pick the best |
+| **Parallel Work** | Run N candidates, pick the best |
 | **Tree-of-Thoughts** | Branch out, prune losers, recurse |
 | **Reflexion** | Retry on failure with self-critique |
 | **Speculate** | Race candidates, take first success |
 
 <div class="mt-3 p-2 rounded border-2 border-dashed border-red-400 text-sm">
-<strong>Concrete:</strong> agent tries 3 candidate bugfixes on the same repo; commit only the one whose tests pass.
+<strong>Example:</strong> agent tries 3 candidate bugfixes on the same repo; commit only the one whose tests pass.
 </div>
 
 </div>
@@ -159,22 +165,70 @@ What do people do today? Look at the right column. They cp -r the whole workspac
 There is also a more sophisticated camp that uses chroot plus bind mounts plus their own home-grown cleanup. That's the closest in spirit to what we want, but it's racy to set up (we'll see why in a few slides) and it still doesn't give you an atomic commit.
 
 What we actually want is at the bottom: one workspace path the agent lives in, N copy-on-write branches of it, first commit wins, siblings auto-discarded, and crucially: no root, no daemon, portable across whatever filesystem you happen to be on. That's the design target for the rest of the talk.
+
+Now let's look at what that pattern looks like to Linux.
 -->
 
 ---
 
-# Six Requirements for Agentic Exploration
+# Agents on Linux: Processes with Effects
+
+<div class="grid grid-cols-2 gap-5 text-sm mt-1">
+
+<div>
+
+From `strace`, an agent looks like a developer typing fast:
+
+```text
+execve("/bin/sh", ["sh", "-c", "pytest -x"], ...)
+openat(AT_FDCWD, "src/parser.py", O_WRONLY|O_TRUNC)
+write(3, "def parse(s):\n    ...", 4096)
+execve("/usr/bin/git", ["git", "apply", "fix.patch"])
+execve("/usr/bin/npm", ["npm", "install", "lodash"])
+unlink("node_modules/.package-lock.json")
+```
+
+</div>
+
+<div>
+
+### What this means for Linux
+
+- They run as **ordinary processes**
+- They produce **side effects**: dirty trees, installed packages, build artifacts, modified dotfiles
+- Nothing in the kernel knows these processes are "speculative"
+
+<div class="mt-3 p-3 bg-blue-50 rounded border border-blue-300 text-sm">
+The OS sees a normal Unix workload. The agent's <em>intent</em> ("this is one of three things I'm trying") is invisible.
+</div>
+
+</div>
+
+</div>
+
+<!--
+Now let's look at that same pattern from Linux's point of view.
+
+If you strace one of these tools, you see the same calls you'd see from a developer at a terminal. execve of /bin/sh. openat and write on source files. git apply. npm install. unlink. The agent is just typing faster than you can.
+
+So the process is ordinary, but the side effects are real. It generates dirty working trees. It installs packages. It modifies dotfiles. It leaves build artifacts. There is nothing in Linux today that knows these operations are speculative, that this is one of several paths being tried.
+
+That's the gap we're trying to fill.
+-->
+
+---
+
+# Runtime Requirements for Agentic Exploration
 
 <div class="text-base mt-2">
 
 | # | Requirement | Why |
 |---|------------|-----|
 | **R1** | **Isolated parallel execution** | Concurrent paths modify same files |
-| **R2** | **Atomic commit + single-winner** | Apply winner's changes, invalidate siblings |
-| **R3** | **Hierarchical nesting** | Tree-of-Thoughts explores sub-variants |
-| **R4** | **Complete filesystem coverage** | Capture *all* modifications, not just tracked files |
-| **R5** | **Lightweight, unprivileged, portable** | Sub-ms creation, no root, any FS (ext4, XFS, NFS...) |
-| **R6** | **Process coordination** | Reliable termination, sibling isolation |
+| **R2** | **Hierarchical nesting** | Tree-of-Thoughts explores sub-variants |
+| **R3** | **Complete filesystem coverage** | Capture *all* modifications, not just tracked files |
+| **R4** | **Lightweight, unprivileged, portable** | Sub-ms creation, no root, any FS (ext4, XFS, NFS...) |
+| **R5** | **Process coordination** | For multi-agent, reliable termination, sibling isolation |
 
 </div>
 

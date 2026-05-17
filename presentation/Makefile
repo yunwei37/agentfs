@@ -14,7 +14,7 @@ build:
 
 # Export to PDF
 export:
-	SLIDEV_EXPORT=1 npx slidev export --output agentfs-slides.pdf
+	SLIDEV_EXPORT=1 pnpm run export
 
 # Clean build artifacts
 clean:
