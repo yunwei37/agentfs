@@ -247,7 +247,7 @@ That's the rubric. Now let's go grade current sandboxes against it.
 - **No root**, **no daemon**, **portable**
 
 <div class="mt-5 p-4 bg-yellow-50 rounded border border-yellow-300 text-xl leading-relaxed">
-The missing piece is not another script. It is an OS-level fork-explore-commit lifecycle.
+Let's see what currently we can build on Linux, and why it doesn't meet the requirements.
 </div>
 
 </div>
@@ -361,7 +361,7 @@ The thing I want you to leave this slide with is the line at the bottom: the ker
 
 # Composition is not straightforward
 
-<div class="grid grid-cols-2 gap-5 text-sm mt-1">
+<div class="grid grid-cols-2 gap-6 text-base mt-2">
 
 <div>
 
@@ -393,8 +393,8 @@ parent: later, cgroup.kill, 12346 survives
 parent: /proc-walk to find it. Maybe.
 ```
 
-<div class="mt-2 p-2 bg-red-50 rounded border border-red-300 text-xs">
-The forked grandchild escapes the cgroup. Reliable cleanup now requires a PID-1 babysitter in each branch, which is the PID-namespace overhead we wanted to avoid.
+<div class="mt-4 p-3 bg-red-50 rounded border border-red-300 text-base">
+The forked grandchild escapes the cgroup. Reliable cleanup now needs a PID-1 babysitter or a single atomic primitive.
 </div>
 
 </div>
@@ -418,7 +418,7 @@ The pattern keeps repeating: every userspace composition has a similar window. T
 
 ---
 
-# The Atomic Composition problem
+# The Atomic Composition Problem
 
 <div class="text-sm mt-1">
 
@@ -450,23 +450,16 @@ Each step in userspace = a **race window** + a **partial-failure path**.
 
 ### Precedent: why `clone()` exists
 
-<div class="border-l-4 border-blue-500 pl-3 mb-2 text-xs">
+<div class="space-y-3 text-base leading-relaxed">
 
-Before `clone()`, you could *almost* build threads from `fork()` + shared memory + signal-based scheduling. But there was no atomic "fork that shares VM".
+- Before `clone()`, threads were almost buildable from `fork()` + shared memory + signals.
+- Linux added `clone()` because that composition needed to be **atomic**.
+- Branch contexts make the same argument for **filesystem state + process isolation**.
+
 </div>
 
-<div class="border-l-4 border-green-500 pl-3 mb-2 text-xs">
-
-`clone()` was added because composing those bits in userspace had race windows.
-</div>
-
-<div class="border-l-4 border-orange-500 pl-3 text-xs">
-
-Same argument applies to **fork-branch-fence-commit**. The pieces exist; the combinator does not.
-</div>
-
-<div class="mt-3 p-2 bg-blue-50 rounded border border-blue-300 text-xs">
-Our claim: <strong>branch contexts</strong> are a new OS abstraction, with two pieces (a filesystem (<strong>BranchFS</strong>) and a syscall (<strong>branch()</strong>)) that together compose the existing primitives atomically.
+<div class="mt-4 p-3 bg-blue-50 rounded border border-blue-300 text-base">
+The missing piece is not another sandbox. It is an OS-level mechanism: <strong>branch()</strong>. The pieces exist, the combinator does not.
 </div>
 
 </div>
@@ -750,17 +743,15 @@ The blue note at the bottom is just the rationale for step ordering, deletes bef
 
 ### Abort: near-zero cost
 
-- `rm -rf @bN/Δ`
-- Siblings remain valid
-- Cost proportional only to delta size, not workspace size
+- Delete the branch delta
+- No base-copy cleanup
+- Cost scales with changed files, not workspace size
 
-### Epoch counter: how siblings find out
+### First-commit-wins
 
-Each branch carries `(parent_epoch, my_epoch)`.
-
-- Commit to parent: `parent.my_epoch++`
-- Sibling's cached `parent_epoch` no longer matches
-- Sibling's next FUSE op detects mismatch → `-ESTALE`
+- Winner commits to the parent
+- Siblings become stale
+- Next sibling operation returns `-ESTALE`
 
 </div>
 
@@ -909,44 +900,48 @@ The blue note is just for the audience who knows FUSE well: yes, the bad reputat
 
 # Demo: A Parallel Agent Run, Start to Finish
 
-<div class="text-xs">
+<div class="grid grid-cols-2 gap-5 text-sm mt-3">
+
+<div>
+
+### Transcript
 
 ```text
-$ branchfs mount $PWD /mnt/work --base-dir /tmp/branchfs-base &
-[branchfs] FUSE 3 passthrough enabled
-[branchfs] mounted at /mnt/work, base=/tmp/branchfs-base
+$ branchfs mount $PWD /mnt/work
 
 $ branchctl create /mnt/work fix-a fix-b fix-c
 @fix-a  @fix-b  @fix-c
 
-$ # Agent runs three candidate fixes in parallel
-$ (cd /mnt/work/@fix-a && agent run "fix the off-by-one" &> a.log) &
-$ (cd /mnt/work/@fix-b && agent run "fix the off-by-one" &> b.log) &
-$ (cd /mnt/work/@fix-c && agent run "fix the off-by-one" &> c.log) &
+$ run-agent @fix-a &
+$ run-agent @fix-b &
+$ run-agent @fix-c &
 $ wait
 
-$ # Each branch ran tests independently
-$ grep -l "passed" {a,b,c}.log
+$ grep -l "passed" *.log
 b.log
 
 $ branchctl commit /mnt/work/@fix-b
-[branchfs] committed @fix-b → base (epoch 0 → 1)
-[branchfs] invalidated siblings: @fix-a, @fix-c
-
-$ branchctl abort /mnt/work/@fix-a /mnt/work/@fix-c
-[branchfs] discarded 2 branches
+[branchfs] committed @fix-b -> base
+[branchfs] invalidated @fix-a, @fix-c
 ```
 
 </div>
 
-<div class="mt-3 text-sm">
+<div>
 
-What just happened:
+### What happened
 
-- **Three branches** created in ~1 ms total
-- Each agent ran in its own delta, no interference
-- `@fix-b` won; its changes are in the base; `@fix-a` and `@fix-c` are gone
-- Total disk delta: **3 × (modified files), not 3 × workspace**
+- Three candidate fixes ran in parallel
+- Each branch wrote to its own delta
+- `@fix-b` committed atomically
+- Losing branches became stale
+- Disk cost: changed files, not workspace copies
+
+<div class="mt-5 p-3 bg-green-50 rounded border border-green-300 text-base">
+This is the whole fork-explore-commit loop in userspace today.
+</div>
+
+</div>
 
 </div>
 
@@ -1157,7 +1152,7 @@ The blue box is the key property to remember. One syscall, different return valu
 
 ### The contract
 
-`branch()` does **no FS-specific work**. It talks to whichever branching filesystem you've mounted via three generic ioctls:
+`branch()` does **no FS-specific work**. It delegates storage operations to the mounted branching filesystem:
 
 ```c
 FS_IOC_BRANCH_CREATE  _IO('b', 0)
@@ -1165,18 +1160,11 @@ FS_IOC_BRANCH_COMMIT  _IO('b', 1)
 FS_IOC_BRANCH_ABORT   _IO('b', 2)
 ```
 
-Pattern follows existing generic ioctls:
-
-- `FICLONE` (cross-FS clone)
-- `FIEMAP` (extent map)
-- `FIDEDUPERANGE` (dedup)
-
 ### What this means
 
-- **BranchFS** implements the ioctls in its FUSE daemon ✓ today
-- **A future Btrfs branching mode** could implement them natively
-- **A future overlayfs commit mode** could implement them too
-- Adding a new branching FS = **3 ioctl handlers**
+- **BranchFS** implements these ioctls today
+- Other filesystems can implement the same contract later
+- New backend = storage semantics, not a new syscall
 
 </div>
 
@@ -1291,52 +1279,48 @@ The QEMU test harness exercises all of this (single commit, three-way race with 
 
 # Latency: Syscall Path Is Cheap
 
-<div class="grid grid-cols-2 gap-5 text-sm mt-1">
+<div class="grid grid-cols-2 gap-6 text-base mt-4">
 
 <div>
 
-### Steady-state, N=1, QEMU/KVM
+### Measured in QEMU/KVM
 
-| Operation | Mean | What's in the path |
-|-----------|------|-------------------|
-| `BR_CREATE` (parent side) | **61–70 µs** | 1× vfs_ioctl to BranchFS via FUSE + 1× `kernel_clone()` |
-| `BR_COMMIT` (child side, steady) | **12–25 µs** | atomic CAS + vfs_ioctl + sibling cleanup (none for N=1) |
+<div class="space-y-4 mt-4">
 
-50 iterations, alternating commit/abort, after the first cold iter.
+<div class="p-4 bg-blue-50 rounded border border-blue-300">
+<div class="text-3xl font-semibold">61–70 µs</div>
+<div><code>BR_CREATE</code>: create branch state + fork child</div>
+</div>
 
-### Comparison to paper's user-side numbers
+<div class="p-4 bg-green-50 rounded border border-green-300">
+<div class="text-3xl font-semibold">12–25 µs</div>
+<div><code>BR_COMMIT</code>: CAS + filesystem commit path</div>
+</div>
 
-- Paper measures from CLI invocation → ~300 µs branch creation
-- We measure kernel syscall round-trip → ~70 µs
-- Difference is the userspace CLI + daemon work the syscall path bypasses
-- **About 4× faster than calling `branchctl` directly**
+<div class="p-4 bg-gray-50 rounded border border-gray-300">
+<div class="text-3xl font-semibold">~300 µs</div>
+<div>BranchFS CLI branch creation in the paper</div>
+</div>
+
+</div>
 
 </div>
 
 <div>
-
-### What dominates BR_CREATE
-
-```text
-        70 µs total
-        ──────────
- 28 µs  vfs_ioctl(FS_IOC_BRANCH_CREATE)
-       , incl. FUSE protocol round-trip
- 25 µs  kernel_clone()
- 12 µs  fork_inherit hook, pt_regs override,
-        copy_to_user(child_pids)
-  5 µs  misc bookkeeping
-```
-
-<div class="mt-2 p-2 bg-blue-50 rounded border border-blue-300 text-xs">
-<strong>Caveat:</strong> these are sanity-check numbers, not paper-quality benchmarks. We'd want: bare metal, multiple base sizes, p99 distributions, comparison vs. <code>unshare</code> + <code>overlayfs</code> baseline.
-</div>
 
 ### The big picture
 
-- LLM step: **100 ms – 10 s**
-- `branch(BR_CREATE)`: **70 µs**
+<div class="mt-5 text-xl leading-loose">
+
+- LLM/tool step: **100 ms – 10 s**
+- `branch(BR_CREATE)`: **~70 µs**
 - Ratio: **at least 1000:1**
+
+</div>
+
+<div class="mt-6 p-4 bg-blue-50 rounded border border-blue-300 text-base leading-relaxed">
+These are sanity-check prototype numbers, not final benchmarks. The point is scale: branching is far below the latency of an agent step.
+</div>
 
 </div>
 
@@ -1362,23 +1346,19 @@ The most important number on this slide is the ratio at the bottom right. The LL
 
 # The Python Library: BranchContext
 
-<div class="grid grid-cols-2 gap-5 text-sm mt-1">
+<div class="grid grid-cols-2 gap-5 text-base mt-2">
 
 <div>
 
-### Seven exploration patterns
+### Patterns the library exposes
 
 | Pattern | Strategy |
 |---------|----------|
-| **Speculate** | Race N candidates, first success wins |
 | **BestOfN** | Run N, commit highest-scoring |
-| **Reflexion** | Sequential retry with feedback |
+| **Speculate** | Race candidates, first success wins |
 | **TreeOfThoughts** | Hierarchical nested branches |
-| **BeamSearch** | Keep top-K at each depth |
-| **Tournament** | Pairwise elimination via judge |
-| **Cascaded** | Start with 1, fan out on failure |
 
-Each pattern manages branch lifecycle + process isolation internally.
+Each pattern manages branch creation, scoring, commit, and cleanup.
 
 `github.com/multikernel/branching`
 
@@ -1403,15 +1383,9 @@ result = ctx.best_of_n(
 # Losers' deltas are gone.
 ```
 
-<div class="mt-2 p-2 bg-green-50 rounded border border-green-300 text-xs">
-The library calls BranchFS today (CLI / ioctls). When <code>branch()</code> lands, it switches to the syscall transparently, same Python API.
+<div class="mt-3 p-3 bg-green-50 rounded border border-green-300 text-base">
+Same Python API: BranchFS today, <code>branch()</code> later.
 </div>
-
-### Today: pure userspace, runs anywhere
-
-- `pip install branchcontext` (PyPI)
-- Needs BranchFS mounted, that's it
-- Works on macOS too (macFUSE)
 
 </div>
 
@@ -1485,28 +1459,28 @@ Next slide: where we're going.
 
 # Roadmap
 
-<div class="grid grid-cols-2 gap-5 text-sm mt-3">
+<div class="grid grid-cols-2 gap-6 text-base mt-4">
 
 <div>
 
 <div class="border-l-4 border-blue-500 pl-3 mb-3">
 
-**Port `branch()` prototype** to current mainline (v6.13+), prepare RFC patch series for `linux-kernel@`.
+**Mainline RFC**: port the `branch()` prototype forward and send the first patch series.
 </div>
 
 <div class="border-l-4 border-green-500 pl-3 mb-3">
 
-**Implement `BR_ISOLATE`** signal/ptrace fence, a few hundred lines in `kernel/signal.c` and `kernel/ptrace.c`.
+**Sibling isolation**: finish the signal / ptrace fence for hostile or buggy branches.
 </div>
 
 <div class="border-l-4 border-orange-500 pl-3 mb-3">
 
-**Nested branches** in kernel + BranchFS, chain already supports it, just lift the `current->branch != NULL` guard.
+**Nested branches**: complete kernel support for recursive exploration.
 </div>
 
 <div class="border-l-4 border-purple-500 pl-3">
 
-**Effect gating**: buffer network/IPC until commit; agent gateways are a natural interposition point.
+**Effect gating**: buffer network / IPC until commit.
 </div>
 
 </div>
@@ -1515,14 +1489,13 @@ Next slide: where we're going.
 
 ### Beyond agents
 
-With `n_branches=1`, `branch()` is a generic **try-and-rollback** primitive:
+With `n_branches=1`, `branch()` is also a generic **try-and-rollback** primitive:
 
 - Package upgrades: try, abort if broken
 - System config: try, revert if reboot fails
 - Schema migrations: try, roll back on error
-- Anything where "do a thing and undo it cleanly if it's bad" is the right shape
 
-<div class="mt-3 p-2 bg-blue-50 rounded border border-blue-300 text-xs">
+<div class="mt-5 p-3 bg-blue-50 rounded border border-blue-300 text-base">
 The fork-explore-commit lifecycle is more general than agents. Agents are just the loudest current use case.
 </div>
 
@@ -1626,17 +1599,15 @@ Our contact info, please reach out. We are genuinely interested in talking to pe
 
 # Key Takeaways
 
-<div class="text-base leading-relaxed mt-4">
+<div class="text-xl leading-relaxed mt-8">
 
-1. **AI agents are ordinary Linux processes with extraordinary side effects.** The OS has no abstraction for "this is one of N speculative paths." Today's hacks (cp -r, git stash, containers) don't fit.
+1. **AI agents are ordinary Linux processes with extraordinary side effects.** The OS and Sandbox cannot tell when a process is one speculative path among many.
 
-2. **Existing primitives don't compose.** OverlayFS, Btrfs, namespaces, cgroups each solve one piece, putting them together in userspace creates race windows.
+2. **Existing primitives don't compose atomically.** Filesystem branching, namespaces, cgroups, and signal fences need one kernel-level lifecycle.
 
-3. **Branch context = CoW FS view + confined process group.** Fork, explore, commit, with first-commit-wins and nesting. New abstraction, small interface.
+3. **Branch context = CoW filesystem view + confined process group.** Fork, explore, commit; first winner lands, losers disappear.
 
-4. **BranchFS works today.** FUSE 3, ~3,400 lines of Rust, no root, portable across filesystems. FUSE passthrough closes the perf gap.
-
-5. **`branch()` is a small kernel patch.** Two hooks (copy_process, do_exit), three ioctls, three patches against v6.17. Working prototype in QEMU. RFC coming.
+4. **BranchFS works today; `branch()` is the kernel path.** Userspace prototype now, RFC direction next.
 
 </div>
 
