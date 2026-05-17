@@ -89,9 +89,9 @@ An **AI agent** is a control loop:
 | **Aider, Cursor agents** | same loop inside an editor |
 | **Devin, OpenAI Codex CLI** | same loop on a hosted machine |
 
-<div class="mt-4 p-3 rounded border-2 border-dashed border-red-400 text-sm">
+<!-- <div class="mt-4 p-3 rounded border-2 border-dashed border-red-400 text-sm">
 In systems terms: the agent has authority to mutate a workspace.
-</div>
+</div> -->
 
 </div>
 
@@ -111,11 +111,9 @@ Next, let's look at the pattern that makes this interesting: agents are starting
 
 # Agent Exploration and Forking
 
-<div class="grid grid-cols-2 gap-5 text-sm mt-1">
+<div class="text-lg mt-4 leading-relaxed">
 
-<div>
-
-Agents increasingly try **multiple paths in parallel**, then keep the winner:
+Agents increasingly try **multiple paths** to solve a problem:
 
 | Pattern | What it does |
 |---------|-------------|
@@ -124,31 +122,8 @@ Agents increasingly try **multiple paths in parallel**, then keep the winner:
 | **Reflexion** | Retry on failure with self-critique |
 | **Speculate** | Race candidates, take first success |
 
-<div class="mt-3 p-2 rounded border-2 border-dashed border-red-400 text-sm">
+<div class="mt-5 p-3 rounded border-2 border-dashed border-red-400 text-lg">
 <strong>Example:</strong> agent tries 3 candidate bugfixes on the same repo; commit only the one whose tests pass.
-</div>
-
-</div>
-
-<div>
-
-### How people do this today
-
-| Hack | Why it hurts |
-|------|--------------|
-| `cp -r workspace branch1/` | 10 GB monorepo → slow, disk hog |
-| `git stash` per attempt | Misses `node_modules`, build artifacts |
-| Docker container per try | Heavyweight, needs daemon, root |
-| One workspace, retry serially | No parallelism, wall-clock loss |
-| `chroot` + bind mounts | Privileged, racy setup, no atomic commit |
-
-### What we want
-
-- **One namespace** the agent lives in
-- **N isolated branches** of it
-- **First one to succeed wins**, siblings discarded
-- **No root**, **no daemon**, **portable**
-
 </div>
 
 </div>
@@ -156,24 +131,16 @@ Agents increasingly try **multiple paths in parallel**, then keep the winner:
 <!--
 Here's the pattern that motivates everything else in this talk.
 
-Agents are starting to do something more interesting than just running serially. They try multiple paths in parallel and keep the one that worked. This is well-studied in the LLM research literature, Best-of-N, Tree-of-Thoughts, Reflexion, speculative parallel decoding. The names don't really matter. What matters is the shape: fan out into N attempts, let them run independently, commit one, discard the rest.
+Agents are starting to do something more interesting than just running serially. They try multiple paths in parallel and keep the one that worked. This is well-studied in the LLM research literature: Best-of-N, Tree-of-Thoughts, Reflexion, speculative execution. The names don't really matter. What matters is the shape: fan out into N attempts, let them run independently, commit one, discard the rest.
 
 Now, if you're going to run three candidate bugfixes against the same repository in parallel, you have a problem: they all want to modify the same files. You need isolation.
-
-What do people do today? Look at the right column. They cp -r the whole workspace, which is fine if your repo is small and miserable if it's a ten gigabyte monorepo. They git stash between attempts, which only captures tracked files, not the node_modules directory, not your build output. They spin up a Docker container per attempt, which requires the docker daemon, often root, and adds startup latency that's huge relative to the actual exploration cost. Or they just give up on parallelism and retry serially, which throws away the whole point.
-
-There is also a more sophisticated camp that uses chroot plus bind mounts plus their own home-grown cleanup. That's the closest in spirit to what we want, but it's racy to set up (we'll see why in a few slides) and it still doesn't give you an atomic commit.
-
-What we actually want is at the bottom: one workspace path the agent lives in, N copy-on-write branches of it, first commit wins, siblings auto-discarded, and crucially: no root, no daemon, portable across whatever filesystem you happen to be on. That's the design target for the rest of the talk.
-
-Now let's look at what that pattern looks like to Linux.
 -->
 
 ---
 
 # Agents on Linux: Processes with Effects
 
-<div class="grid grid-cols-2 gap-5 text-sm mt-1">
+<div class="grid grid-cols-2 gap-6 text-lg mt-3">
 
 <div>
 
@@ -195,10 +162,10 @@ unlink("node_modules/.package-lock.json")
 ### What this means for Linux
 
 - They run as **ordinary processes**
-- They produce **side effects**: dirty trees, installed packages, build artifacts, modified dotfiles
+- They produce **unpredictable side effects**: dirty trees, installed packages, build artifacts, modified dotfiles
 - Nothing in the kernel knows these processes are "speculative"
 
-<div class="mt-3 p-3 bg-blue-50 rounded border border-blue-300 text-sm">
+<div class="mt-4 p-4 bg-blue-50 rounded border border-blue-300 text-lg leading-relaxed">
 The OS sees a normal Unix workload. The agent's <em>intent</em> ("this is one of three things I'm trying") is invisible.
 </div>
 
@@ -233,25 +200,66 @@ That's the gap we're trying to fill.
 </div>
 
 <div class="mt-3 p-3 bg-yellow-50 rounded border border-yellow-300 text-base text-center">
-No existing Linux mechanism satisfies all six. Let's walk through why.
+No existing Linux mechanism satisfies these requirements. Let's walk through why.
 </div>
 
 <!--
-Before we go look at the existing mechanisms, let me consolidate what we actually need into six requirements. I'll wave at these whenever I'm explaining why something falls short.
+Before we go look at the existing mechanisms, let me consolidate what we actually need into five requirements. I'll wave at these whenever I'm explaining why something falls short.
 
 R1: isolated parallel execution. The siblings run at the same time and they may touch the same files. So they need separate views.
 
-R2: atomic commit with single-winner resolution. When one branch decides it has won (say its tests passed) its changes need to land in the parent atomically, and the losing siblings need to be invalidated so they can't accidentally commit stale state on top.
+R2: hierarchical nesting. Tree-of-Thoughts and similar patterns recurse. A branch may itself spawn sub-branches. We need a tree, not a flat fan-out.
 
-R3: hierarchical nesting. Tree-of-Thoughts and similar patterns recurse. A branch may itself spawn sub-branches. We need a tree, not a flat fan-out.
+R3: complete filesystem coverage. This is the killer for git stash. Agents do things like npm install, pip install, cargo build. The interesting filesystem changes are in directories that .gitignore lists. We have to capture all of it.
 
-R4: complete filesystem coverage. This is the killer for git stash. Agents do things like npm install, pip install, cargo build. The interesting filesystem changes are in directories that .gitignore lists. We have to capture all of it.
+R4: lightweight, unprivileged, portable. Branch creation should be in the microsecond range so agents can branch per reasoning step. No root, because agents run in CI, in containers, on developer laptops. Portable across filesystems, because not everyone is on btrfs.
 
-R5: lightweight, unprivileged, portable. Branch creation should be in the microsecond range so agents can branch per reasoning step. No root, because agents run in CI, in containers, on developer laptops. Portable across filesystems, because not everyone is on btrfs.
+R5: process coordination. Each branch spawns its own processes, a test runner, a compiler, an installer. When we commit or abort, all of those processes must die reliably, and one branch's processes must not be able to signal another branch's processes.
 
-R6: process coordination. Each branch spawns its own processes, a test runner, a compiler, an installer. When we commit or abort, all of those processes must die reliably, and one branch's processes must not be able to signal another branch's processes.
+That's the rubric. Now let's go grade current sandboxes against it.
+-->
 
-That's the rubric. Now let's go grade Linux against it.
+---
+
+# Current Sandboxes Fall Short
+
+<div class="grid grid-cols-2 gap-5 text-base mt-2">
+
+<div>
+
+| Hack | Why it hurts |
+|------|--------------|
+| `cp -r workspace branch1/` | 10 GB monorepo -> slow, disk hog |
+| `git stash` per attempt | Misses `node_modules`, build artifacts |
+| Docker container per try | Heavyweight, needs daemon, root |
+| One workspace, retry serially | No parallelism, wall-clock loss |
+| `chroot` + bind mounts | Privileged, racy setup, no atomic commit |
+
+</div>
+
+<div class="text-xl leading-relaxed">
+
+### What actually needs:
+
+- **One namespace** the agent lives in
+- **N isolated branches** of it
+- **Parent-child relationships** between branches
+- **No root**, **no daemon**, **portable**
+
+<div class="mt-5 p-4 bg-yellow-50 rounded border border-yellow-300 text-xl leading-relaxed">
+The missing piece is not another script. It is an OS-level fork-explore-commit lifecycle.
+</div>
+
+</div>
+
+</div>
+
+<!--
+What do people do today? They cp -r the whole workspace, which is fine if your repo is small and miserable if it's a ten gigabyte monorepo. They git stash between attempts, which only captures tracked files, not the node_modules directory, not your build output. They spin up a Docker container per attempt, which requires the docker daemon, often root, and adds startup latency that's huge relative to the actual exploration cost. Or they just give up on parallelism and retry serially, which throws away the whole point.
+
+There is also a more sophisticated camp that uses chroot plus bind mounts plus their own home-grown cleanup. That's the closest in spirit to what we want, but it's racy to set up and it still doesn't give you an atomic commit.
+
+What we actually want is on the right: one workspace path the agent lives in, N copy-on-write branches of it, first commit wins, siblings auto-discarded, and crucially: no root, no daemon, portable across whatever filesystem you happen to be on. That's the design target for the rest of the talk.
 -->
 
 ---
@@ -351,7 +359,7 @@ The thing I want you to leave this slide with is the line at the bottom: the ker
 
 ---
 
-# The Composition Race
+# Composition is not straightforward
 
 <div class="grid grid-cols-2 gap-5 text-sm mt-1">
 
@@ -410,7 +418,7 @@ The pattern keeps repeating: every userspace composition has a similar window. T
 
 ---
 
-# The Real Problem: Atomic Composition
+# The Atomic Composition problem
 
 <div class="text-sm mt-1">
 
@@ -420,7 +428,7 @@ The pattern keeps repeating: every userspace composition has a similar window. T
 
 ### What we keep finding
 
-Every existing primitive does **one thing well**: but agentic exploration needs **all of them, composed atomically**:
+Every existing OS primitive does **one thing well**: but agentic exploration needs **all of them, composed atomically**:
 
 ```text
    ┌── FS branch (per-branch upperdir)
@@ -481,7 +489,7 @@ That's the pivot. From here on, I'm going to show you the combinator. We've spli
 
 ---
 
-# Branch Contexts: The Abstraction
+# Branch Contexts: Our Solution
 
 <div class="grid grid-cols-2 gap-4 text-sm mt-1">
 
@@ -539,7 +547,7 @@ On the right is the architecture, the picture you'll see for the rest of the tal
 
 ---
 
-# BranchFS at a Glance
+# BranchFS
 
 <div class="grid grid-cols-2 gap-5 text-sm mt-3">
 
