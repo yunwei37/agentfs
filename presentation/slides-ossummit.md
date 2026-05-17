@@ -44,8 +44,8 @@ I'll leave roughly ten minutes for questions at the end.
 
 <div class="text-xl mt-5 leading-loose">
 
-1. **Background**: AI agents as ordinary Linux workloads
-2. **Problem**: speculative execution leaves real filesystem and process side effects
+1. **Background**: AI agents needs support for fork and exploration
+2. **Problem**: execution leaves real filesystem and process side effects
 3. **Requirements**: what fork-explore-commit needs from the OS
 4. **Design**: branch contexts as the abstraction
 5. **Implementation**: BranchFS in userspace, `branch()` in the kernel
