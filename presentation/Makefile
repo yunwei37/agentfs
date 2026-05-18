@@ -18,4 +18,4 @@ export:
 
 # Clean build artifacts
 clean:
-	rm -rf dist agentfs-slides.pdf
+	rm -rf dist branchcontext-slides.pdf

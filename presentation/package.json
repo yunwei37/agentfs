@@ -5,7 +5,7 @@
   "scripts": {
     "build": "slidev build slides-ossummit.md",
     "dev": "slidev slides-ossummit.md --open",
-    "export": "slidev export slides-ossummit.md --output agentfs-slides.pdf --per-slide --timeout 120000"
+    "export": "slidev export slides-ossummit.md --output branchcontext-slides.pdf --per-slide --timeout 120000"
   },
   "dependencies": {
     "@slidev/cli": "^52.6.0",
