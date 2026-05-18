@@ -1526,35 +1526,26 @@ The blue note is the framing line: agents are the loudest current use case but t
 
 # How to Try It, How to Help
 
-<div class="grid grid-cols-2 gap-4 text-sm mt-1">
+<div class="grid grid-cols-2 gap-4 text-xs mt-1">
 
 <div>
 
 ### Try it
 
 ```bash
-# BranchFS (works today, any Linux)
-$ cargo install branchfs
-$ branchfs mount /repo /mnt/work
-
-# Python integration
+# BranchFS — works on any Linux today
+$ cargo install branchfs && branchfs mount /repo /mnt/work
 $ pip install branchcontext
-
-# Kernel prototype (5 min on a 24-core box)
-$ git clone https://github.com/multikernel/branchcontext
-$ cd branchcontext/prototype
-$ ./scripts/build-kernel.sh
-$ ./scripts/run-qemu.sh
 ```
 
-### Help
+Kernel prototype + paper: <https://arxiv.org/abs/2602.08199>
 
-| What | Where |
-|------|-------|
-| Bugs / features | GitHub issues |
-| Kernel review | LKML thread (coming soon) |
-| New branching FS backends | Implement `FS_IOC_BRANCH_*` |
-| Agent integrations | BranchContext patterns |
+### Help wanted
+
+- **Bugs / features** → GitHub issues
+- **Kernel review** → LKML thread (soon)
+- **New FS backends** → implement `FS_IOC_BRANCH_*`
+- **Agent integrations** → BranchContext patterns
 
 </div>
 
@@ -1562,22 +1553,9 @@ $ ./scripts/run-qemu.sh
 
 ### Repos
 
-| Project | URL |
-|---------|-----|
-| BranchFS (FUSE FS) | `github.com/multikernel/branchfs` |
-| BranchContext (Python) | `github.com/multikernel/branching` |
-| Paper + prototype | `github.com/multikernel/branchcontext` |
-
-### License
-
-- BranchFS: MIT / Apache-2.0
-- BranchContext: Apache-2.0
-- Kernel patches: GPL-2.0 (matches Linux)
-
-### Contact
-
-- **Cong Wang**: cwang@multikernel.io
-- **Yusheng Zheng**: yzhen165@ucsc.edu
+- BranchFS — `github.com/multikernel/branchfs`
+- BranchContext — `github.com/multikernel/branching`
+- Paper — <https://arxiv.org/abs/2602.08199>
 
 </div>
 
