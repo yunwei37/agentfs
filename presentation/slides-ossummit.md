@@ -541,7 +541,7 @@ The architecture diagram shows the same idea. The parent process calls branch wi
 
 ### What it is
 
-- **~3,400 lines of Rust**, FUSE 3
+- **~4,400 lines of Rust**, FUSE 3
 - Userspace daemon: **no root**, no kernel module
 - Portable: **ext4, XFS, btrfs, tmpfs, NFS**, any POSIX FS
 - MIT / Apache-2.0
@@ -554,12 +554,11 @@ The architecture diagram shows the same idea. The parent process calls branch wi
 ### Using it
 
 ```bash
-$ branchfs mount /repo /mnt/work
-$ branchctl create /mnt/work feature-a
-@feature-a
+$ branchfs mount --base /repo /mnt/work
+$ branchfs create feature-a /mnt/work
 $ cd /mnt/work/@feature-a
 $ vim src/parser.py && make test
-$ branchctl commit /mnt/work/@feature-a
+$ branchfs commit /mnt/work
 ```
 
 </div>
@@ -573,7 +572,7 @@ It runs entirely as a userspace daemon. There is no kernel module and no privile
 
 It works over ordinary filesystems: ext4, XFS, Btrfs, tmpfs, NFS, and others. It is open source under the MIT and Apache 2.0 licenses.
 
-Using it is meant to feel simple. You mount BranchFS over a repository, create a named branch with branchctl, and get back an @-prefixed path for that branch. Then you cd into that path and work as if you were in a normal repository. The branch can see the base files, but any writes are captured into its own delta layer. When you are done, branchctl commit applies the delta atomically, and branchctl abort throws it away.
+Using it is meant to feel simple. You mount BranchFS over a repository with branchfs mount --base, create a named branch with branchfs create, and get back an @-prefixed path for that branch. Then you cd into that path and work as if you were in a normal repository. The branch can see the base files, but any writes are captured into its own delta layer. When you are done, branchfs commit applies the delta atomically, and branchfs abort throws it away.
 
 That's the user interface. Let's look at how it works underneath.
 -->
@@ -817,6 +816,7 @@ The next slide tackles the question I get every time I talk about a FUSE filesys
 - Subsequent reads bypass the daemon entirely
 - Used by BranchFS for **all unmodified files**
 - Modified files still go through the daemon
+- **Opt-in** (`--passthrough`); needs `CAP_SYS_ADMIN`
 
 <div class="mt-3 p-2 bg-blue-50 rounded border border-blue-300 text-xs">
 The "FUSE is slow" reputation comes from the default mode's 19% number. Passthrough closes the gap to ~82% with no application changes.
@@ -848,22 +848,17 @@ The old reputation is not imaginary; default FUSE mode really is much slower. Bu
 ### Transcript
 
 ```text
-$ branchfs mount $PWD /mnt/work
+$ branchfs mount --base $PWD /mnt/work
+$ cd /mnt/work
 
-$ branchctl create /mnt/work fix-a fix-b fix-c
-@fix-a  @fix-b  @fix-c
+# Race 3 fixes, first success wins
+$ branching speculate \
+    -c "./try_fix_a.sh && pytest" \
+    -c "./try_fix_b.sh && pytest" \
+    -c "./try_fix_c.sh && pytest"
 
-$ run-agent @fix-a &
-$ run-agent @fix-b &
-$ run-agent @fix-c &
-$ wait
-
-$ grep -l "passed" *.log
-b.log
-
-$ branchctl commit /mnt/work/@fix-b
-[branchfs] committed @fix-b -> base
-[branchfs] invalidated @fix-a, @fix-c
+[branching] @fix-b: success, committed
+[branching] @fix-a, @fix-c: aborted
 ```
 
 </div>
@@ -889,21 +884,17 @@ This is the whole fork-explore-commit loop in userspace today.
 <!--
 Now let's walk through what this looks like end to end. This is a real run from my laptop, trimmed down to fit on the slide.
 
-We mount BranchFS over the current directory with a base directory that lives in /tmp. The daemon starts up, reports that FUSE 3 passthrough is enabled.
+We mount BranchFS over the current directory and cd into the mount. The daemon starts up and reports that FUSE 3 passthrough is available.
 
-Then we create three named branches: fix-a, fix-b, and fix-c. They show up as @-prefixed paths under the mount.
+Then we drive the parallel run with one command: branching speculate, with three -c commands. That's the user-facing CLI for first-wins speculation. BranchContext is the Python library and CLI we ship on top of BranchFS, and the next slide will go into it. For now, the important thing is that one command takes three shell candidates and races them.
 
-Now we launch three agent runs in parallel. Each one cd's into its own branch and runs the same task: fix the off-by-one error. They run at the same time, each one writes to its own delta, and each one produces its own test log.
+Under the hood, branching speculate creates three named branches via BranchFS, fans out one process per candidate into its @-prefixed path, and waits for any of them to succeed. Each candidate writes to its own delta. The first one whose command exits zero wins.
 
-We grep for which one's tests passed. fix-b won.
-
-We commit fix-b. BranchFS reports that the epoch moved forward and the losing branches are now stale. The changes from fix-b are in the base directory, so the next process that opens the workspace sees the winning fix.
-
-We clean up the losing branches with branchctl abort. They are gone, with no files left behind and no temporary clutter.
+In this run, fix-b's pytest passed first. BranchContext commits @fix-b atomically: its delta becomes the new base state, and the epoch advances. The other two branches return -ESTALE on their next operation and are aborted automatically.
 
 Notice the disk footprint. Three branches running in parallel did not require three copies of the workspace. Each branch's delta only contains the files it actually modified. If the off-by-one was a one-line change to one Python file, each delta is a few hundred bytes. We just got three-way exploration for the cost of three small files, not three copies of a multi-gigabyte repo.
 
-This is BranchFS working in userspace today. No kernel changes required. This script runs on Ubuntu 22.04, on Fedora, on Arch, on a Mac with macFUSE, wherever you have FUSE 3.
+This is BranchFS plus BranchContext working in userspace today. No kernel changes required. This runs on Ubuntu 22.04, on Fedora, on Arch, on a Mac with macFUSE, wherever you have FUSE 3.
 -->
 
 ---
@@ -1259,7 +1250,7 @@ The latency test gives us the numbers. In steady state, after the cold-cache fir
 
 BR_COMMIT on the child side takes 12 to 25 microseconds in steady state. That includes the atomic winner check, the vfs_ioctl to BranchFS for the commit, and sibling cleanup. For this small benchmark, sibling cleanup is basically free.
 
-The paper reports BranchFS branch creation at about 300 microseconds. The syscall path is faster because the paper measures the branchctl command-line path, including process startup, argument parsing, and the daemon control socket. The kernel path bypasses that and talks directly to the FUSE daemon through the ioctl.
+The paper reports BranchFS branch creation at about 300 microseconds. The syscall path is faster because the paper measures the branchfs command-line path, including process startup, argument parsing, and the daemon control socket. The kernel path bypasses that and talks directly to the FUSE daemon through the ioctl.
 
 The cost breakdown for BR_CREATE is also useful. The vfs_ioctl path to BranchFS is the largest single chunk, about 28 microseconds, dominated by the FUSE protocol round trip and the kernel-to-userspace context switch. kernel_clone is about 25 microseconds. Our own hook is about 12 microseconds. The remaining bookkeeping is about five microseconds. None of those costs are anywhere near the size of a Python import, let alone an LLM call.
 
@@ -1449,7 +1440,7 @@ There is also a broader use case beyond agents. If n_branches is one, branch() b
 ```bash
 # BranchFS - works on any Linux today
 $ cargo install branchfs
-$ branchfs mount /repo /mnt/work
+$ branchfs mount --base /repo /mnt/work
 $ pip install branchcontext
 ```
 
