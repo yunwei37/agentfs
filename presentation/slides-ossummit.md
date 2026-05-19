@@ -567,7 +567,11 @@ $ branchfs commit /mnt/work
 
 </div>
 
-<div class="mt-4 text-xs text-center opacity-70">
+<div class="mt-3 p-2 bg-blue-50 rounded border border-blue-300 text-xs text-center">
+Every branch is also reachable at <code>/mnt/work/@&lt;name&gt;/</code>. Multiple agents share one mount via <code>@branch</code> paths.
+</div>
+
+<div class="mt-3 text-xs text-center opacity-70">
 ~4,400 LoC Rust &middot; FUSE 3 &middot; MIT/Apache-2.0 &middot; <code>github.com/multikernel/branchfs</code>
 </div>
 
@@ -579,6 +583,8 @@ It is about 4,400 lines of Rust, built on the fuser library, which is the standa
 It works over ordinary filesystems: ext4, XFS, Btrfs, tmpfs, NFS, and others. It is open source under MIT and Apache 2.0.
 
 The right column shows the usage. You mount BranchFS over a repository with branchfs mount --base, create a named branch with branchfs create, and get back an @-prefixed path for that branch. Then you cd into that path and work as if you were in a normal repository. The branch can see the base files, but any writes are captured into its own delta layer. When you are done, branchfs commit applies the delta atomically, and branchfs abort throws it away.
+
+The @-path is the key to parallel agents. Every branch is reachable at /mnt/work/@<name>/, and that path resolves to the branch independently of whatever "current branch" the mount happens to be on. So N agents can share one mount and one daemon, each addressing its own @-path, with no per-agent setup and no coordination between them. The demo a few slides from now leans on exactly this.
 
 That's the user interface. Let's look at how it works underneath.
 -->
@@ -737,7 +743,7 @@ The note at the bottom is the rationale for the ordering: deletes before creates
 
 ### Abort: near-zero cost
 
-- Delete the branch delta — that's it
+- Delete the branch delta; nothing else to do
 - No base-copy cleanup needed
 - Cost scales with changed files, not workspace size
 
@@ -782,7 +788,7 @@ Abort is the cheap side of the branch lifecycle, and the performance numbers tel
 
 Abort first: rm -rf the branch's delta directory. That's it. Siblings are untouched. The cost is just the unlink work, proportional to whatever the aborted branch had built up. No coordination needed. The epoch counter from the previous slide is what makes the first-commit-wins side cheap too: no global lock, the winner just bumps a counter and siblings notice lazily on their next FUSE op.
 
-Now the numbers. Branch creation is O(1) — it doesn't matter whether your base has a hundred files or ten thousand, you pay about 300 microseconds. Because creation is literally a mkdir of the delta directory; no file copying happens until you actually write.
+Now the numbers. Branch creation is O(1); it doesn't matter whether your base has a hundred files or ten thousand, you pay about 300 microseconds. Because creation is literally a mkdir of the delta directory; no file copying happens until you actually write.
 
 Commit and abort scale with how much you changed, not how big the workspace is. A kilobyte is 317 microseconds, a megabyte is two milliseconds. Abort is even cheaper than commit because it just unlinks.
 
