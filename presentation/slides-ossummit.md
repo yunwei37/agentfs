@@ -208,7 +208,7 @@ With that rubric in mind, let's look at the current options.
 
 ---
 
-# Current Approaches Fall Short
+# Existing Solutions Fall Short
 
 <div class="grid grid-cols-2 gap-5 text-base mt-2">
 
@@ -231,7 +231,7 @@ With that rubric in mind, let's look at the current options.
 - **One namespace** the agent lives in
 - **N isolated branches** of it
 - **Nested branches** for recursive exploration
-- **No root**, **no daemon**, **portable**
+- **No root**, **portable**
 
 <div class="mt-5 p-4 bg-yellow-50 rounded border border-yellow-300 text-xl leading-relaxed">
 Let's see what Linux gives us today, and why it is not enough.
@@ -268,8 +268,11 @@ sudo mount -t overlay overlay \
 ✓ Per-branch view · ✓ All modifications captured · ✓ Portable
 
 ✗ **`sudo mount`** required (rootless overlay is fragile)
+
 ✗ **Cannot commit changes back**: `rsync upperdir/ → lowerdir/` skips whiteout deletions
+
 ✗ **No automatic cleanup for losing branches**
+
 ✗ Nesting is complex and easy to break
 
 </div>
@@ -286,8 +289,11 @@ $ btrfs subvolume snapshot /repo /repo-b2
 ✓ O(1) creation · ✓ Block-level CoW · ✓ Nested subvolumes first-class
 
 ✗ **FS-locked**: your CI runs ext4, your colleague's laptop runs ext4
+
 ✗ **Cannot commit changes back**: `btrfs subvolume promote` doesn't exist
+
 ✗ **NFS / tmpfs / overlayfs** unsupported
+
 ✗ ZFS: `zfs promote` inverts parent ↔ child (wrong shape)
 
 </div>
@@ -718,110 +724,68 @@ The note at the bottom is the rationale for the ordering: deletes before creates
 
 ---
 
-# Abort, Epoch Counter, and Costs
+# Cost and Performance
 
-<div class="grid grid-cols-2 gap-5 text-sm mt-1">
+<div class="grid grid-cols-2 gap-5 text-sm mt-2">
 
 <div>
 
 ### Abort: near-zero cost
 
-- Delete the branch delta
-- No base-copy cleanup
+- Delete the branch delta — that's it
+- No base-copy cleanup needed
 - Cost scales with changed files, not workspace size
 
-### First-commit-wins
-
-- Winner's changes land
-- Losing branches become stale
-- Their next operation returns `-ESTALE`
+<div class="mt-4 p-2 bg-blue-50 rounded border border-blue-300 text-xs">
+This is BranchFS's <strong>first-commit-wins primitive</strong>. The <code>branch()</code> syscall (later) drives commit/abort through ioctls without changing the semantics.
+</div>
 
 </div>
 
 <div>
 
-### Costs at a glance
+<div class="font-semibold text-blue-600 mb-1">Branch creation: O(1)</div>
 
-| Op | Cost |
-|-----|------|
-| Create | ~300 µs (mkdir) |
-| Commit 1 KB | ~317 µs |
-| Commit 1 MB | ~2.1 ms |
-| Abort | ~315 µs |
-
-<div class="mt-3 p-2 bg-blue-50 rounded border border-blue-300 text-xs">
-This is BranchFS's <strong>first-commit-wins primitive</strong>. The <code>branch()</code> syscall (later) drives it through ioctls, without changing the semantics.
-</div>
-
-</div>
-
-</div>
-
-<!--
-Abort is much simpler than commit, and it also explains why the epoch counter matters. To abort a branch, we remove that branch's delta directory, while other branches are untouched. The cost is just the unlink work, proportional to whatever the aborted branch had built up.
-
-The epoch counter is the trick that makes first-commit-wins work without a global lock. Each branch carries two numbers: the epoch it expects from the branch it came from, and its own current epoch. When a branch commits, the target epoch advances. Any losing branch now has an expected epoch that no longer matches reality. The next FUSE operation from that branch sees the mismatch and returns -ESTALE. The detection is lazy, which is what we want: when a winner commits, all we have to do is bump a counter. The losing branches discover their fate when they next try to do something.
-
-The cost table gives the scale. Create is about 300 microseconds, dominated by the mkdir of the delta directory. Commit cost scales with modification size: a kilobyte is 317 microseconds, and a megabyte is about two milliseconds. Abort is roughly constant, about 315 microseconds, because it is just unlink work. All numbers are from a small Ryzen 5500U laptop.
-
-The important point is that the branch() kernel syscall, which we will see in a few slides, drives these exact commit and abort operations through ioctls. The semantics do not change. The kernel just adds atomic process coordination on top.
--->
-
-
----
-
-# Performance: Branch, Commit, Abort
-
-<div class="grid grid-cols-2 gap-4 text-sm mt-3">
-
-<div class="border-2 border-blue-400 rounded-lg p-4">
-
-<div class="font-semibold text-blue-600 mb-2">Branch Creation: O(1)</div>
-
-| Base Size | Latency |
+| Base size | Latency |
 |:-:|:-:|
 | 100 files | 292 μs |
 | 1,000 files | 317 μs |
 | 10,000 files | 310 μs |
 
-Independent of base size, it's just a `mkdir`.
+<div class="font-semibold text-green-600 mt-3 mb-1">Commit & Abort: O(delta)</div>
 
-</div>
-
-<div class="border-2 border-green-400 rounded-lg p-4">
-
-<div class="font-semibold text-green-600 mb-2">Commit & Abort</div>
-
-| Mod. Size | Commit | Abort |
+| Mod. size | Commit | Abort |
 |:-:|:-:|:-:|
 | 1 KB | 317 μs | 315 μs |
 | 100 KB | 514 μs | 365 μs |
 | 1 MB | 2.1 ms | 890 μs |
 
-Proportional to modification size, not workspace size.
-
 </div>
 
 </div>
 
-<div class="mt-4 text-sm text-center">
-
-For agents doing LLM calls of **100 ms – 10 s** per step, **sub-millisecond branching is invisible**.
-
+<div class="mt-3 text-sm text-center">
+For agents doing LLM calls of <strong>100 ms – 10 s</strong> per step, <strong>sub-millisecond branching is invisible</strong>.
 </div>
 
-<div class="mt-3 text-xs text-center opacity-60">
+<div class="mt-1 text-xs text-center opacity-60">
 Hardware: AMD Ryzen 5 5500U (6c/12t), 8 GB DDR4, NVMe SSD. Median of 10 trials.
 </div>
 
 <!--
-There are two numbers worth knowing about the branch lifecycle. Branch creation is O(1). It does not matter whether the base directory has a hundred files or ten thousand files, because creating a branch is just a mkdir for the delta directory. No file copying happens until the branch actually writes something.
+Abort is the cheap side of the branch lifecycle, and the performance numbers tell the story for both directions.
 
-Commit and abort scale with how much the branch changed, not with the size of the workspace. Committing a kilobyte of changes takes about 317 microseconds, and a megabyte takes about two milliseconds. Abort is even cheaper because it mostly unlinks files from the delta directory.
+Abort first: rm -rf the branch's delta directory. That's it. Siblings are untouched. The cost is just the unlink work, proportional to whatever the aborted branch had built up. No coordination needed. The epoch counter from the previous slide is what makes the first-commit-wins side cheap too: no global lock, the winner just bumps a counter and siblings notice lazily on their next FUSE op.
 
-The main point is the scale. Agents spend 100 milliseconds to several seconds on model and tool steps. Against that, sub-millisecond branching is not the bottleneck.
+Now the numbers. Branch creation is O(1) — it doesn't matter whether your base has a hundred files or ten thousand, you pay about 300 microseconds. Because creation is literally a mkdir of the delta directory; no file copying happens until you actually write.
 
-The next question people usually ask is whether FUSE is too slow, so let's look at read throughput.
+Commit and abort scale with how much you changed, not how big the workspace is. A kilobyte is 317 microseconds, a megabyte is two milliseconds. Abort is even cheaper than commit because it just unlinks.
+
+The framing line is what I want you to walk out with: agents do LLM calls, those calls take 100 ms at the absolute fastest, often several seconds. Sub-millisecond branching is invisible against that. We are not the bottleneck.
+
+The blue callout foreshadows the kernel side: the branch() syscall a few slides from now drives these exact commit and abort operations through ioctls. The semantics don't change. The kernel just adds atomic process coordination on top.
+
+The next slide tackles the question I get every time I talk about a FUSE filesystem: but isn't FUSE slow?
 -->
 
 ---
@@ -1483,12 +1447,13 @@ There is also a broader use case beyond agents. If n_branches is one, branch() b
 ### Try it
 
 ```bash
-# BranchFS — works on any Linux today
-$ cargo install branchfs && branchfs mount /repo /mnt/work
+# BranchFS - works on any Linux today
+$ cargo install branchfs
+$ branchfs mount /repo /mnt/work
 $ pip install branchcontext
 ```
 
-Kernel prototype + paper: <https://arxiv.org/abs/2602.08199>
+(Optional) Kernel patches: <https://github.com/yunwei37/agentfs/tree/main/prototype/patches>
 
 ### Help wanted
 
@@ -1501,11 +1466,11 @@ Kernel prototype + paper: <https://arxiv.org/abs/2602.08199>
 
 <div>
 
-### Repos
+### Resources
 
-- BranchFS — `github.com/multikernel/branchfs`
-- BranchContext — `github.com/multikernel/branching`
-- Paper — <https://arxiv.org/abs/2602.08199>
+- BranchFS - `github.com/multikernel/branchfs`
+- BranchContext - `github.com/multikernel/branching`
+- Original Paper - <https://arxiv.org/abs/2602.08199>
 
 </div>
 
