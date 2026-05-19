@@ -584,7 +584,7 @@ It works over ordinary filesystems: ext4, XFS, Btrfs, tmpfs, NFS, and others. It
 
 The right column shows the usage. You mount BranchFS over a repository with branchfs mount --base, create a named branch with branchfs create, and get back an @-prefixed path for that branch. Then you cd into that path and work as if you were in a normal repository. The branch can see the base files, but any writes are captured into its own delta layer. When you are done, branchfs commit applies the delta atomically, and branchfs abort throws it away.
 
-The @-path is the key to parallel agents. Every branch is reachable at /mnt/work/@<name>/, and that path resolves to the branch independently of whatever "current branch" the mount happens to be on. So N agents can share one mount and one daemon, each addressing its own @-path, with no per-agent setup and no coordination between them. The demo a few slides from now leans on exactly this.
+The @-path is the key to parallel agents. Every branch is reachable at /mnt/work/@<name>/, and that path resolves to the branch independently of whatever "current branch" the mount happens to be on. So N agents can share one mount and one daemon, each addressing its own @-path, with no per-agent setup and no coordination between them. The demo later in the talk leans on exactly this.
 
 That's the user interface. Let's look at how it works underneath.
 -->
@@ -848,66 +848,6 @@ With passthrough, BranchFS reads at 7.2 gigabytes per second, which is 82 percen
 The old reputation is not imaginary; default FUSE mode really is much slower. But passthrough closes most of the gap for unmodified files, and for agent workloads the remaining gap is not the limiting factor.
 -->
 
-
----
-
-# Demo: A Parallel Agent Run, Start to Finish
-
-<div class="grid grid-cols-2 gap-5 text-sm mt-3">
-
-<div>
-
-### Transcript
-
-```text
-$ branchfs mount --base $PWD /mnt/work
-$ cd /mnt/work
-
-# Race 3 fixes, first success wins
-$ branching speculate \
-    -c "./try_fix_a.sh && pytest" \
-    -c "./try_fix_b.sh && pytest" \
-    -c "./try_fix_c.sh && pytest"
-
-[branching] @fix-b: success, committed
-[branching] @fix-a, @fix-c: aborted
-```
-
-</div>
-
-<div>
-
-### What happened
-
-- Three candidate fixes ran in parallel
-- Each branch wrote to its own delta
-- `@fix-b` committed atomically
-- Losing branches became stale
-- Disk cost: changed files, not workspace copies
-
-<div class="mt-5 p-3 bg-green-50 rounded border border-green-300 text-base">
-This is the whole fork-explore-commit loop in userspace today.
-</div>
-
-</div>
-
-</div>
-
-<!--
-Now let's walk through what this looks like end to end. This is a real run from my laptop, trimmed down to fit on the slide.
-
-We mount BranchFS over the current directory and cd into the mount. The daemon starts up and reports that FUSE 3 passthrough is available.
-
-Then we drive the parallel run with one command: branching speculate, with three -c commands. That's the user-facing CLI for first-wins speculation. BranchContext is the Python library and CLI we ship on top of BranchFS, and the next slide will go into it. For now, the important thing is that one command takes three shell candidates and races them.
-
-Under the hood, branching speculate creates three named branches via BranchFS, fans out one process per candidate into its @-prefixed path, and waits for any of them to succeed. Each candidate writes to its own delta. The first one whose command exits zero wins.
-
-In this run, fix-b's pytest passed first. BranchContext commits @fix-b atomically: its delta becomes the new base state, and the epoch advances. The other two branches return -ESTALE on their next operation and are aborted automatically.
-
-Notice the disk footprint. Three branches running in parallel did not require three copies of the workspace. Each branch's delta only contains the files it actually modified. If the off-by-one was a one-line change to one Python file, each delta is a few hundred bytes. We just got three-way exploration for the cost of three small files, not three copies of a multi-gigabyte repo.
-
-This is BranchFS plus BranchContext working in userspace today. No kernel changes required. This runs on Ubuntu 22.04, on Fedora, on Arch, on a Mac with macFUSE, wherever you have FUSE 3.
--->
 
 ---
 
@@ -1330,6 +1270,66 @@ The agent author opens a BranchContext over the BranchFS mount. Then they call b
 The migration story is deliberate. Today, BranchContext calls BranchFS via its CLI and ioctls. When the branch() syscall is upstream, the library can switch to using the syscall, with the same Python API and more atomic behavior underneath. We want agent authors to write to a stable API now and benefit from kernel improvements later without rewriting their code.
 
 Today this is pure userspace. You pip install branchcontext, mount BranchFS, and use the same Python API. It works on Linux, and it also works on macOS through macFUSE.
+-->
+
+---
+
+# Demo: A Parallel Agent Run, Start to Finish
+
+<div class="grid grid-cols-2 gap-5 text-sm mt-3">
+
+<div>
+
+### Transcript
+
+```text
+$ branchfs mount --base $PWD /mnt/work
+$ cd /mnt/work
+
+# Race 3 fixes, first success wins
+$ branching speculate \
+    -c "./try_fix_a.sh && pytest" \
+    -c "./try_fix_b.sh && pytest" \
+    -c "./try_fix_c.sh && pytest"
+
+[branching] @fix-b: success, committed
+[branching] @fix-a, @fix-c: aborted
+```
+
+</div>
+
+<div>
+
+### What happened
+
+- Three candidate fixes ran in parallel
+- Each branch wrote to its own delta
+- `@fix-b` committed atomically
+- Losing branches became stale
+- Disk cost: changed files, not workspace copies
+
+<div class="mt-5 p-3 bg-green-50 rounded border border-green-300 text-base">
+This is the whole fork-explore-commit loop in userspace today.
+</div>
+
+</div>
+
+</div>
+
+<!--
+Now let's walk through what this looks like end to end. This is a real run from my laptop, trimmed down to fit on the slide.
+
+We mount BranchFS over the current directory and cd into the mount. The daemon starts up and reports that FUSE 3 passthrough is available.
+
+Then we drive the parallel run with one command: branching speculate, with three -c commands. That's the user-facing CLI for first-wins speculation, built on top of the BranchContext library from the previous slide. The important thing is that one command takes three shell candidates and races them.
+
+Under the hood, branching speculate creates three named branches via BranchFS, fans out one process per candidate into its @-prefixed path, and waits for any of them to succeed. Each candidate writes to its own delta. The first one whose command exits zero wins.
+
+In this run, fix-b's pytest passed first. BranchContext commits @fix-b atomically: its delta becomes the new base state, and the epoch advances. The other two branches return -ESTALE on their next operation and are aborted automatically.
+
+Notice the disk footprint. Three branches running in parallel did not require three copies of the workspace. Each branch's delta only contains the files it actually modified. If the off-by-one was a one-line change to one Python file, each delta is a few hundred bytes. We just got three-way exploration for the cost of three small files, not three copies of a multi-gigabyte repo.
+
+This is BranchFS plus BranchContext working in userspace today. No kernel changes required. This runs on Ubuntu 22.04, on Fedora, on Arch, on a Mac with macFUSE, wherever you have FUSE 3.
 -->
 
 ---
