@@ -119,9 +119,11 @@ Agents increasingly try **multiple paths** to solve a problem:
 </div>
 
 <!--
-This is the pattern that motivates the rest of the talk. Agents are starting to try several paths at the same time. You see this in Best-of-N, Tree-of-Thoughts, RL rollouts, and speculative execution. For an RL rollout, think of several trial runs where each result gets a score, or reward.
+This is the pattern that motivates the rest of the talk. Agents are starting to try several paths at the same time, instead of betting everything on one attempt. You see this in Best-of-N, Tree-of-Thoughts, RL rollouts, and speculative execution.
 
-The names are less important than the shape. The agent fans out into several attempts, lets them run independently, keeps the result that works, and throws away the rest. If those attempts are three bug fixes in the same repository, they will all want to touch the same files, so we need isolation.
+For example, an agent might try three candidate bug fixes in the same repository. Each attempt edits files, runs tests, and produces a result. The orchestrator keeps the fix that passes and throws away the other two. For an RL rollout, the idea is similar: run several trials, give each outcome a score or reward, and use that score to decide what to keep.
+
+The names are less important than the shape. The agent fans out into several attempts, lets them run independently, keeps the result that works, and discards the rest. Once those attempts touch the same workspace, they need isolation.
 -->
 
 ---
@@ -191,7 +193,9 @@ No existing Linux mechanism satisfies these requirements. Let's walk through why
 <!--
 Before we look at existing mechanisms, let me spell out what we need. There are five requirements that I will keep coming back to.
 
-First, the branches have to run in parallel without stepping on each other. They may edit the same files, so each branch needs its own view of the workspace. Second, the model has to support nesting. Patterns like Tree-of-Thoughts can recurse, so a branch may need to create sub-branches of its own.
+First, the branches have to run in parallel without stepping on each other. They may edit the same files, so each branch needs its own view of the workspace.
+
+Second, the model has to support nesting. Patterns like Tree-of-Thoughts can recurse, so a branch may need to create sub-branches of its own.
 
 Third, we need complete filesystem coverage. This is where git stash breaks down. Agents run npm install, pip install, cargo build, and similar commands. Many of the files that matter are ignored by Git, but they still affect the result, so we have to capture them.
 
@@ -949,26 +953,25 @@ This is BranchFS working in userspace today. No kernel changes required. This sc
 | Requirement | Status |
 |------------|--------|
 | R1 isolated views | ✓ via delta layers |
-| R2 atomic commit | ✓ via epoch counter |
-| R3 nesting | ✓ via branch chain |
-| R4 complete FS coverage | ✓ |
-| R5 unprivileged, portable | ✓ |
-| R6 process coordination | **✗, userspace cannot do this safely** |
+| R2 nesting | ✓ via branch chain |
+| R3 complete FS coverage | ✓ via FUSE layer |
+| R4 lightweight, unprivileged, portable | ✓ userspace FUSE |
+| R5 coordination | **✗, userspace cannot do this safely** |
 
 </div>
 
 <div class="mt-4 p-3 bg-red-50 rounded border border-red-300 text-sm text-center">
-Five of six checked. Process coordination needs the kernel.
+Four of five checked. Coordination needs the kernel.
 </div>
 
 <!--
 At this point, let's pause and check the requirements.
 
-For the first five requirements, BranchFS in userspace gives us what we need. Isolated views come from delta layers. Atomic commit comes from the epoch counter. Nesting comes from the branch chain. Complete filesystem coverage comes from intercepting everything at the FUSE layer. Unprivileged and portable operation comes from being a userspace FUSE daemon over an ordinary directory.
+For the first four requirements, BranchFS in userspace gives us what we need. Isolated views come from delta layers. Nesting comes from the branch chain. Complete filesystem coverage comes from intercepting everything at the FUSE layer. Lightweight, unprivileged, and portable operation comes from being a userspace FUSE daemon over an ordinary directory.
 
-The missing requirement is process coordination. We cannot get that from a userspace FUSE filesystem alone. We need atomic process spawn into a branch context, reliable termination of all processes in a branch when it commits or aborts, and a fence between sibling branches so they cannot signal each other. We also need all of that to compose atomically with the filesystem branch setup, so there are no race windows. That is the kernel's territory.
+The missing requirement is coordination. We cannot get that from a userspace FUSE filesystem alone. We need atomic process spawn into a branch context, reliable termination of all processes in a branch when it commits or aborts, and a fence between sibling branches so they cannot signal each other. We also need all of that to compose atomically with the filesystem branch setup, so there are no race windows. That is the kernel's territory.
 
-So five of the six requirements are handled in userspace, and the last one needs the kernel. Next, I will show what userspace can and cannot do for process coordination, and then I will show the kernel race in code.
+So four of the five requirements are handled in userspace, and the last one needs the kernel. Next, I will show what userspace can and cannot do for coordination, and then I will show the kernel race in code.
 -->
 
 ---
