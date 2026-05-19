@@ -119,7 +119,7 @@ Agents increasingly try **multiple paths** to solve a problem:
 |---------|-------------|
 | **Parallel Work** | Run N candidates, pick the best |
 | **Tree-of-Thoughts** | Branch out, prune losers, recurse |
-| **Reflexion** | Retry on failure with self-critique |
+| **RL rollout** | Sample trajectories, score by reward |
 | **Speculate** | Race candidates, take first success |
 
 <div class="mt-5 p-3 rounded border-2 border-dashed border-red-400 text-lg">
@@ -131,7 +131,7 @@ Agents increasingly try **multiple paths** to solve a problem:
 <!--
 Here's the pattern that motivates everything else in this talk.
 
-Agents are starting to do something more interesting than just running serially. They try multiple paths in parallel and keep the one that worked. This is well-studied in the LLM research literature: Best-of-N, Tree-of-Thoughts, Reflexion, speculative execution. The names don't really matter. What matters is the shape: fan out into N attempts, let them run independently, commit one, discard the rest.
+Agents are starting to do something more interesting than just running serially. They try multiple paths in parallel and keep the one that worked. This is well-studied in the LLM research literature: Best-of-N, Tree-of-Thoughts, RL rollouts, speculative execution. The names don't really matter. What matters is the shape: fan out into N attempts, let them run independently, commit one, discard the rest.
 
 Now, if you're going to run three candidate bugfixes against the same repository in parallel, you have a problem: they all want to modify the same files. You need isolation.
 -->
