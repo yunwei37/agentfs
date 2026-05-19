@@ -533,19 +533,20 @@ The architecture diagram shows the same idea. The parent process calls branch wi
 
 ---
 
-# BranchFS
+# BranchFS - Speculative Branching Filesystem
 
 <div class="grid grid-cols-2 gap-5 text-sm mt-3">
 
 <div>
 
-### What it is
+### What it does
 
-- **~4,400 lines of Rust**, FUSE 3
-- Userspace daemon: **no root**, no kernel module
-- Portable: **ext4, XFS, btrfs, tmpfs, NFS**, any POSIX FS
-- MIT / Apache-2.0
-- `github.com/multikernel/branchfs`
+- **CoW branch** per `@path` over any directory
+- First write copies the file into the branch's delta
+- **Atomic commit-to-parent**
+- **Zero-cost abort** (delete the delta)
+- **Nested branches** along a chain back to base
+- **No root**, runs on any POSIX FS
 
 </div>
 
@@ -565,14 +566,18 @@ $ branchfs commit /mnt/work
 
 </div>
 
+<div class="mt-4 text-xs text-center opacity-70">
+~4,400 LoC Rust &middot; FUSE 3 &middot; MIT/Apache-2.0 &middot; <code>github.com/multikernel/branchfs</code>
+</div>
+
 <!--
-BranchFS is the userspace half of the design. It is about 3,400 lines of Rust, built on the fuser library, which is the standard Rust binding for the FUSE 3 protocol.
+BranchFS is the userspace half of the design. It implements the filesystem side of a branch context: a copy-on-write branch per @-prefixed path, atomic commit back to the parent branch, and zero-cost abort that just deletes the delta. Branches can nest along a chain back to the base directory.
 
-It runs entirely as a userspace daemon. There is no kernel module and no privileged install. That gives us the usual FUSE benefits: anyone can run it, it works across kernels, and bugs crash the daemon rather than the kernel. The performance gap that FUSE used to have is also much smaller now because of FUSE 3 passthrough mode, which I will show in a few slides.
+It is about 4,400 lines of Rust, built on the fuser library, which is the standard Rust binding for the FUSE 3 protocol. It runs entirely as a userspace daemon: no kernel module, no privileged install. That gives us the usual FUSE benefits: anyone can run it, it works across kernels, and bugs crash the daemon rather than the kernel. The performance gap that FUSE used to have is also much smaller now because of FUSE 3 passthrough mode, which I will show in a few slides.
 
-It works over ordinary filesystems: ext4, XFS, Btrfs, tmpfs, NFS, and others. It is open source under the MIT and Apache 2.0 licenses.
+It works over ordinary filesystems: ext4, XFS, Btrfs, tmpfs, NFS, and others. It is open source under MIT and Apache 2.0.
 
-Using it is meant to feel simple. You mount BranchFS over a repository with branchfs mount --base, create a named branch with branchfs create, and get back an @-prefixed path for that branch. Then you cd into that path and work as if you were in a normal repository. The branch can see the base files, but any writes are captured into its own delta layer. When you are done, branchfs commit applies the delta atomically, and branchfs abort throws it away.
+The right column shows the usage. You mount BranchFS over a repository with branchfs mount --base, create a named branch with branchfs create, and get back an @-prefixed path for that branch. Then you cd into that path and work as if you were in a normal repository. The branch can see the base files, but any writes are captured into its own delta layer. When you are done, branchfs commit applies the delta atomically, and branchfs abort throws it away.
 
 That's the user interface. Let's look at how it works underneath.
 -->
