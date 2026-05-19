@@ -116,11 +116,11 @@ Next, let's look at the pattern that makes this interesting: agents are starting
 Agents increasingly try **multiple paths** to solve a problem:
 
 | Pattern | What it does |
-|---------|-------------|
-| **Parallel Work** | Run N candidates, pick the best |
-| **Tree-of-Thoughts** | Branch out, prune losers, recurse |
-| **RL rollout** | Sample trajectories, score by reward |
-| **Speculate** | Race candidates, take first success |
+|---------|---------------------|
+| **Parallel Work** | Try several solutions at once, keep the best result |
+| **Tree-of-Thoughts** | Explore a tree of reasoning paths, prune weak ones |
+| **RL rollout** | Run trials and score the outcome as reward |
+| **Speculate** | Start likely paths early |
 
 <div class="mt-5 p-3 rounded border-2 border-dashed border-red-400 text-lg">
 <strong>Example:</strong> agent tries 3 candidate bugfixes on the same repo; commit only the one whose tests pass.
@@ -131,7 +131,7 @@ Agents increasingly try **multiple paths** to solve a problem:
 <!--
 Here's the pattern that motivates everything else in this talk.
 
-Agents are starting to do something more interesting than just running serially. They try multiple paths in parallel and keep the one that worked. This is well-studied in the LLM research literature: Best-of-N, Tree-of-Thoughts, RL rollouts, speculative execution. The names don't really matter. What matters is the shape: fan out into N attempts, let them run independently, commit one, discard the rest.
+Agents are starting to do something more interesting than just running serially. They try multiple paths in parallel and keep the one that worked. This is well-studied in the LLM research literature: Best-of-N, Tree-of-Thoughts, RL rollouts, speculative execution. For RL rollout, think of a complete trial run whose outcome is scored by a reward signal. The names don't really matter. What matters is the shape: fan out into N attempts, let them run independently, commit one, discard the rest.
 
 Now, if you're going to run three candidate bugfixes against the same repository in parallel, you have a problem: they all want to modify the same files. You need isolation.
 -->
@@ -163,7 +163,6 @@ unlink("node_modules/.package-lock.json")
 
 - They run as **ordinary processes**
 - They produce **unpredictable side effects**: dirty trees, installed packages, build artifacts, modified dotfiles
-- Nothing in the kernel knows these processes are "speculative"
 
 <div class="mt-4 p-4 bg-blue-50 rounded border border-blue-300 text-lg leading-relaxed">
 The OS sees a normal Unix workload. The agent's <em>intent</em> ("this is one of three things I'm trying") is invisible.
@@ -195,7 +194,7 @@ That's the gap we're trying to fill.
 | **R2** | **Hierarchical nesting** | Tree-of-Thoughts explores sub-variants |
 | **R3** | **Complete filesystem coverage** | Capture *all* modifications, not just tracked files |
 | **R4** | **Lightweight, unprivileged, portable** | Sub-ms creation, no root, any FS (ext4, XFS, NFS...) |
-| **R5** | **Process coordination** | For multi-agent, reliable termination, sibling isolation |
+| **R5** | **Coordination** | For multi-agent, reliable termination, sibling isolation |
 
 </div>
 
@@ -221,7 +220,7 @@ That's the rubric. Now let's go grade current sandboxes against it.
 
 ---
 
-# Current Sandboxes Fall Short
+# Current Approaches Fall Short
 
 <div class="grid grid-cols-2 gap-5 text-base mt-2">
 
@@ -243,11 +242,11 @@ That's the rubric. Now let's go grade current sandboxes against it.
 
 - **One namespace** the agent lives in
 - **N isolated branches** of it
-- **Parent-child relationships** between branches
+- **Nested branches** for recursive exploration
 - **No root**, **no daemon**, **portable**
 
 <div class="mt-5 p-4 bg-yellow-50 rounded border border-yellow-300 text-xl leading-relaxed">
-Let's see what currently we can build on Linux, and why it doesn't meet the requirements.
+Let's see what currently we can build on, and why it doesn't meet the requirements.
 </div>
 
 </div>
@@ -259,7 +258,7 @@ What do people do today? They cp -r the whole workspace, which is fine if your r
 
 There is also a more sophisticated camp that uses chroot plus bind mounts plus their own home-grown cleanup. That's the closest in spirit to what we want, but it's racy to set up and it still doesn't give you an atomic commit.
 
-What we actually want is on the right: one workspace path the agent lives in, N copy-on-write branches of it, first commit wins, siblings auto-discarded, and crucially: no root, no daemon, portable across whatever filesystem you happen to be on. That's the design target for the rest of the talk.
+What we actually want is on the right: one workspace path the agent lives in, N copy-on-write branches of it, first commit wins, losing branches are auto-discarded, and crucially: no root, no daemon, portable across whatever filesystem you happen to be on. That's the design target for the rest of the talk.
 -->
 
 ---
@@ -281,9 +280,9 @@ sudo mount -t overlay overlay \
 ✓ Per-branch view · ✓ All modifications captured · ✓ Portable
 
 ✗ **`sudo mount`** required (rootless overlay is fragile)
-✗ **No commit-to-parent**: `rsync upperdir/ → lowerdir/` skips whiteout deletions
-✗ **No sibling invalidation**
-✗ Nesting is brittle
+✗ **Cannot commit changes back**: `rsync upperdir/ → lowerdir/` skips whiteout deletions
+✗ **No automatic cleanup for losing branches**
+✗ Nesting is complex and easy to break
 
 </div>
 
@@ -299,7 +298,7 @@ $ btrfs subvolume snapshot /repo /repo-b2
 ✓ O(1) creation · ✓ Block-level CoW · ✓ Nested subvolumes first-class
 
 ✗ **FS-locked**: your CI runs ext4, your colleague's laptop runs ext4
-✗ **No commit-to-parent**: `btrfs subvolume promote` doesn't exist
+✗ **Cannot commit changes back**: `btrfs subvolume promote` doesn't exist
 ✗ **NFS / tmpfs / overlayfs** unsupported
 ✗ ZFS: `zfs promote` inverts parent ↔ child (wrong shape)
 
@@ -308,7 +307,7 @@ $ btrfs subvolume snapshot /repo /repo-b2
 </div>
 
 <div class="mt-4 p-3 bg-red-50 rounded border border-red-300 text-sm text-center">
-Both come close. Both miss <strong>commit-to-parent</strong>, <strong>sibling invalidation</strong>, and either <strong>unprivileged</strong> or <strong>portable</strong> operation.
+Both come close. Both miss <strong>committing changes back</strong>, <strong>discarding losing branches</strong>, and either <strong>unprivileged</strong> or <strong>portable</strong> operation.
 </div>
 
 <!--
@@ -318,13 +317,13 @@ Left side: OverlayFS. Mount with a lowerdir, an upperdir, and a workdir. You get
 
 Three checks pass: per-branch view, all modifications captured, portable over any lower filesystem.
 
-Four checks fail. The mount command needs root, rootless overlay exists since kernel 5.11 but is fragile across distros. There's no commit; if you try to rsync the upperdir back to the lower, you miss the character-device whiteouts that represent deletions, and the deleted file reappears on next mount. No sibling invalidation. Nesting two overlays is technically supported but complex and brittle.
+Four checks fail. The mount command needs root, rootless overlay exists since kernel 5.11 but is fragile across distros. There's no clean way to commit changes back; if you try to rsync the upperdir back to the lower, you miss the character-device whiteouts that represent deletions, and the deleted file reappears on next mount. There's no automatic cleanup for losing branches. Nesting two overlays is technically supported but complex and easy to break.
 
 Right side: Btrfs and ZFS subvolumes. btrfs subvolume snapshot is the right shape conceptually. Truly O(1), block-level CoW, nested subvolumes are first-class. Three checks pass.
 
-But four checks fail. It's filesystem-locked: your CI is on ext4, your colleague is on ext4, your customers are on whatever they're on. No commit-to-parent, btrfs subvolume promote doesn't exist; you're back to rsync. NFS, tmpfs, overlayfs all unsupported because they're not Btrfs. ZFS has zfs promote, but it inverts the parent-child relationship in the dataset tree, which is not the operation we want, plus the licensing issue keeps it out of mainline.
+But four checks fail. It's filesystem-locked: your CI is on ext4, your colleague is on ext4, your customers are on whatever they're on. There's no clean way to commit changes back; btrfs subvolume promote doesn't exist, so you're back to rsync. NFS, tmpfs, overlayfs all unsupported because they're not Btrfs. ZFS has zfs promote, but it inverts the parent-child relationship in the dataset tree, which is not the operation we want, plus the licensing issue keeps it out of mainline.
 
-The red box is the takeaway: both come close. The shape is roughly right. But both miss commit-to-parent, both miss sibling invalidation, and they fail R5 in opposite ways, OverlayFS fails on unprivileged, Btrfs fails on portable.
+The red box is the takeaway: both come close. The shape is roughly right. But both miss committing changes back, both miss discarding losing branches, and they fail R5 in opposite ways, OverlayFS fails on unprivileged, Btrfs fails on portable.
 -->
 
 ---
@@ -346,7 +345,7 @@ Each primitive does one thing well, none does the whole job:
 </div>
 
 <div class="mt-4 p-3 bg-yellow-50 rounded border border-yellow-300 text-base text-center">
-The kernel exposes the right <strong>ingredients</strong>, but not the right <strong>combinator</strong>.
+The kernel exposes the right <strong>ingredients</strong>, but not one operation that <strong>combines them safely</strong>.
 </div>
 
 <!--
@@ -354,7 +353,7 @@ Mechanism three: the process side. PID namespaces, mount namespaces, cgroup v2, 
 
 Each piece exists and each piece individually does something useful. PID namespaces give you a reliable kill of everything inside. cgroup v2 added cgroup.kill in 5.14 which is a much cleaner group-kill primitive than walking PIDs. clone3 lets you compose namespaces atomically at process creation. Mount namespaces give us the private workspace view we need anyway. Process groups via setpgid and setsid are the oldest mechanism, they work for cooperative children, but a child can call setsid() and leave the group, so they can't be used for isolation against hostile or buggy code.
 
-The thing I want you to leave this slide with is the line at the bottom: the kernel exposes the right ingredients. None of them is missing. What's missing is the combinator, the single operation that says "give me all of these together, atomically." That's what the next slide is going to show you.
+The thing I want you to leave this slide with is the line at the bottom: the kernel exposes the right ingredients. None of them is missing. What's missing is one operation that combines them safely, the single operation that says "give me all of these together, atomically." That's what the next slide is going to show you.
 -->
 
 ---
@@ -376,7 +375,7 @@ The thing I want you to leave this slide with is the line at the bottom: the ker
    (no primitive, DIY)
 ```
 
-Each step can fail. Each gap between steps is a **race window**.
+Each step can fail. Each gap between steps is a **race window**; making cleanup reliable adds overhead.
 
 </div>
 
@@ -459,7 +458,7 @@ Each step in userspace = a **race window** + a **partial-failure path**.
 </div>
 
 <div class="mt-4 p-3 bg-blue-50 rounded border border-blue-300 text-base">
-The missing piece is not another sandbox. It is an OS-level mechanism: <strong>branch()</strong>. The pieces exist, the combinator does not.
+The missing piece is not another sandbox. It is an OS-level mechanism: <strong>branch()</strong>. The pieces exist, but Linux lacks one operation that combines them safely.
 </div>
 
 </div>
@@ -475,9 +474,9 @@ What we keep finding when we go down the existing-mechanisms list is that every 
 
 The thing we need (agentic exploration) needs all of those pieces, but composed atomically. The agent says "give me three branches" and we need: a filesystem branch, a mount namespace, a process group with reliable termination, a fence between siblings, and a child PID back to the parent, all in one operation that either fully succeeds or fully cleans up.
 
-This is not a new shape of problem in Linux. This is exactly why clone() exists. Before clone, you could almost build threads out of fork plus shared memory plus signal-based scheduling. People did, and it was awful, and there were race windows. Linus added clone() so the kernel could do the composition atomically. We are making the same argument: the pieces for fork-branch-fence-commit exist, the kernel combinator does not.
+This is not a new shape of problem in Linux. This is exactly why clone() exists. Before clone, you could almost build threads out of fork plus shared memory plus signal-based scheduling. People did, and it was awful, and there were race windows. Linus added clone() so the kernel could do the composition atomically. We are making the same argument: the pieces for fork-branch-fence-commit exist, but Linux lacks one kernel operation that combines them safely.
 
-That's the pivot. From here on, I'm going to show you the combinator. We've split it into two pieces, a filesystem called BranchFS that you can install today, and a kernel syscall called branch() that we have a working prototype of. Let's look at each.
+That's the pivot. From here on, I'm going to show you that operation. We've split it into two pieces, a filesystem called BranchFS that you can install today, and a kernel syscall called branch() that we have a working prototype of. Let's look at each.
 -->
 
 ---
