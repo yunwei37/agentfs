@@ -572,7 +572,7 @@ Every branch is also reachable at <code>/mnt/work/@&lt;name&gt;/</code>. Multipl
 </div>
 
 <div class="mt-3 text-xs text-center opacity-70">
-~4,400 LoC Rust &middot; FUSE 3 &middot; MIT/Apache-2.0 &middot; <code>github.com/multikernel/branchfs</code>
+~4,400 LoC Rust &middot; FUSE 3 &middot; MIT/Apache-2.0 &middot; <a href="https://github.com/multikernel/branchfs"><code>github.com/multikernel/branchfs</code></a>
 </div>
 
 <!--
@@ -1043,9 +1043,7 @@ union branch_attr a = {
   }
 };
 int idx = branch(BR_CREATE, &a, sizeof(a));
-
-if (idx == 0) {
-  // parent: wait for winner
+if (idx == 0) { // parent: wait for winner
   while (wait(NULL) > 0);
 } else {
   // child: idx is 1, 2, or 3
@@ -1289,7 +1287,7 @@ The most important number is the ratio. A model or tool step is usually between 
 
 Each pattern manages branch creation, scoring, commit, and cleanup.
 
-`github.com/multikernel/branching`
+[`github.com/multikernel/branching`](https://github.com/multikernel/branching)
 
 </div>
 
@@ -1471,8 +1469,8 @@ $ pip install branchcontext
 
 ### Resources
 
-- BranchFS - `github.com/multikernel/branchfs`
-- BranchContext - `github.com/multikernel/branching`
+- BranchFS - [`github.com/multikernel/branchfs`](https://github.com/multikernel/branchfs)
+- BranchContext - [`github.com/multikernel/branching`](https://github.com/multikernel/branching)
 - Original Paper - <https://arxiv.org/abs/2602.08199>
 
 </div>
@@ -1508,11 +1506,11 @@ The repos are listed here: BranchFS, BranchContext, and the paper-plus-prototype
 <div class="mt-4 flex gap-6 justify-center text-sm">
 
 <div class="p-2 bg-blue-50 rounded border border-blue-300">
-BranchFS: <strong>github.com/multikernel/branchfs</strong>
+BranchFS: <a href="https://github.com/multikernel/branchfs"><strong>github.com/multikernel/branchfs</strong></a>
 </div>
 
 <div class="p-2 bg-green-50 rounded border border-green-300">
-BranchContext: <strong>github.com/multikernel/branching</strong>
+BranchContext: <a href="https://github.com/multikernel/branching"><strong>github.com/multikernel/branching</strong></a>
 </div>
 
 </div>
@@ -1550,8 +1548,8 @@ Open Source Summit 2026
 
 <div class="mt-3 flex gap-6 justify-center text-sm">
 
-<div>BranchFS: github.com/multikernel/branchfs</div>
-<div>BranchContext: github.com/multikernel/branching</div>
+<div>BranchFS: <a href="https://github.com/multikernel/branchfs">github.com/multikernel/branchfs</a></div>
+<div>BranchContext: <a href="https://github.com/multikernel/branching">github.com/multikernel/branching</a></div>
 
 </div>
 
