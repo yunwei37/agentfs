@@ -49,7 +49,7 @@ I'll leave roughly ten minutes for questions at the end.
 3. **Requirements**: what fork-explore-commit needs from the OS
 4. **Design**: branch contexts as the abstraction
 5. **Implementation**: BranchFS in userspace, `branch()` in the kernel
-6. **Evaluation & Status**: latency, demo, limitations, roadmap
+6. **Status**: latency, demo, limitations, roadmap
 
 </div>
 
