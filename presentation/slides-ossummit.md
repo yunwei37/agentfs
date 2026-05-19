@@ -1107,10 +1107,11 @@ Three logical commits against `v6.17`.
 
 ```bash
 $ ./scripts/build-kernel.sh   # clone + patch + build
-$ cargo build --release       # BranchFS
 $ make -C test                # test program
 $ ./scripts/build-rootfs.sh   # initramfs
 $ ./scripts/run-qemu.sh       # boot + run
+
+$ cargo build --release       # BranchFS
 ```
 
 </div>
@@ -1451,7 +1452,8 @@ There is also a broader use case beyond agents. If n_branches is one, branch() b
 # BranchFS - works on any Linux today
 $ cargo install branchfs
 $ branchfs mount --base /repo /mnt/work
-$ pip install branchcontext
+# Install branching tool
+$ pip install BranchContext
 ```
 
 (Optional) Kernel patches: <https://github.com/yunwei37/agentfs/tree/main/prototype/patches>
