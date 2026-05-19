@@ -282,6 +282,7 @@ sudo mount -t overlay overlay \
 ### Btrfs / ZFS subvolumes
 
 ```bash
+$ btrfs subvolume create /repo
 $ btrfs subvolume snapshot /repo /repo-b1
 $ btrfs subvolume snapshot /repo /repo-b2
 ```
